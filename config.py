@@ -263,6 +263,18 @@ class Config(BaseModel):
         default=None,
         description="API key for authenticating incoming requests. None means no auth.",
     )
+    run_blocking_by_asyncio_thread_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, MCP tool handlers dispatch their synchronous "
+            "document-generation work to a worker thread via "
+            "asyncio.to_thread, keeping the FastMCP event loop free to "
+            "serve health probes and concurrent requests. When False "
+            "(default), tools run inline on the event loop — preserving "
+            "the original blocking behavior. Toggled via the "
+            "RUN_BLOCKING_BY_ASYNCIO_THREAD_ENABLED environment variable."
+        ),
+    )
 
     @staticmethod
     def _parse_bool(value: Optional[str]) -> bool:
@@ -341,8 +353,17 @@ class Config(BaseModel):
         # API key authentication (optional – empty/missing means no auth)
         raw_api_key = (os.environ.get("API_KEY") or "").strip() or None
 
+        # Toggle for thread-pool offload of blocking tool work.
+        # Default False preserves the legacy inline-blocking behavior.
+        run_blocking_by_asyncio_thread_enabled = cls._parse_bool(os.environ.get("RUN_BLOCKING_BY_ASYNCIO_THREAD_ENABLED"))
+
         try:
-            return cls(logging=logging_settings, storage=storage_settings, api_key=raw_api_key)
+            return cls(
+                logging=logging_settings,
+                storage=storage_settings,
+                api_key=raw_api_key,
+                run_blocking_by_asyncio_thread_enabled=run_blocking_by_asyncio_thread_enabled,
+            )
         except ValidationError as e:
             # Wrap Pydantic validation errors in a simpler exception for callers
             raise ValueError(f"Invalid configuration: {e}")

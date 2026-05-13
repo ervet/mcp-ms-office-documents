@@ -43,6 +43,7 @@ from fastmcp import FastMCP
 
 from upload_tools import upload_file
 from template_utils import find_file_in_template_dirs
+from async_runner import run_blocking
 from .helpers import (
     parse_inline_formatting,
     contains_block_markdown,
@@ -493,9 +494,20 @@ def _register_single_template(mcp: FastMCP, spec: Dict[str, Any]) -> None:
     model = create_model(f"{name}_DocxArgs", **fields)  # type: ignore
     globals()[model.__name__] = model
 
-    # Create the tool function
+    # Create the tool function.
+    #
+    # The tool body (`_sync_impl`) is synchronous and performs blocking
+    # work: opening the .docx zip, mustache-style placeholder
+    # substitution, and synchronous upload to the configured backend.
+    # It is wrapped in an `async def` (`tool_impl`) that dispatches the
+    # call through `run_blocking()`, so the work either runs on a
+    # worker thread (when RUN_BLOCKING_BY_ASYNCIO_THREAD_ENABLED is
+    # truthy) or inline on the event loop (default, legacy behaviour).
+    # FastMCP awaits the async tool directly, leaving dispatch entirely
+    # to our helper — keeping behaviour consistent with the static tools
+    # in main.py.
     def make_tool_fn(_model=model, _template_path=resolved, _name=name):
-        def tool_impl(data: _model) -> str:  # type: ignore
+        def _sync_impl(data):
             try:
                 # Load the template document
                 doc = DocxDocument(_template_path)
@@ -523,6 +535,9 @@ def _register_single_template(mcp: FastMCP, spec: Dict[str, Any]) -> None:
             except Exception as e:
                 logger.error(f"[dynamic-docx] Error generating document from {_name}: {e}", exc_info=True)
                 raise ToolError(f"Error generating document from template {_name}: {e}")
+
+        async def tool_impl(data: _model) -> str:  # type: ignore
+            return await run_blocking(_sync_impl, data)
 
         tool_impl.__annotations__['data'] = _model  # type: ignore[index]
         tool_impl.__annotations__['return'] = str  # type: ignore[index]

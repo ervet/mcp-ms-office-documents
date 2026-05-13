@@ -1,6 +1,4 @@
-import asyncio
-import functools
-from typing import Annotated, Callable, List, Dict, Optional, Literal, TypeVar
+from typing import Annotated, List, Dict, Optional, Literal
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -15,6 +13,7 @@ from pathlib import Path
 from config import get_config
 from xml_tools import create_xml_file
 from middleware import ApiKeyAuthMiddleware
+from async_runner import run_blocking
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
@@ -22,68 +21,8 @@ import logging
 mcp = FastMCP("MCP Office Documents")
 
 
-# ---------------------------------------------------------------------------
-# Async-safe wrapper for blocking document-generation calls
-# ---------------------------------------------------------------------------
-# Every Office-document generator in this project (markdown_to_word,
-# markdown_to_excel, create_presentation, create_eml, create_xml_file) is a
-# synchronous, blocking function. They perform:
-#
-#   * file I/O (opening .docx / .pptx templates, which are zip archives)
-#   * CPU-bound markdown parsing
-#   * synchronous network I/O (requests.get for image downloads, boto3
-#     S3 uploads)
-#
-# FastMCP runs on top of an asyncio event loop (uvicorn / Starlette).
-# Calling a blocking function directly from an `async def` tool handler
-# freezes the loop for the full duration of the call — no other request
-# can be served while the loop is blocked, including the Kubernetes
-# liveness / readiness probes at /healthl, /healthr, /healths. Repeated
-# probe timeouts cause kubelet to SIGTERM the pod, which is the failure
-# mode we observed in EKS:
-#
-#     ERROR: ASGI callable returned without completing response.
-#     ERROR: Cancel 0 running task(s), timeout graceful shutdown exceeded
-#
-# (The "0 running tasks" line is the giveaway: there were no async tasks
-# because the work was running synchronously on the event loop itself.)
-#
-# To keep the loop responsive, all blocking work is dispatched to the
-# default asyncio thread pool via `asyncio.to_thread`. The wrapper
-# preserves the original function's call signature exactly — no behavioral
-# change to any tool's logic.
-# ---------------------------------------------------------------------------
-
-T = TypeVar("T")
-
-
-async def run_blocking(func: Callable[..., T], /, *args, **kwargs) -> T:
-    """Run a synchronous callable on a worker thread.
-
-    Use this from any `async def` MCP tool handler that calls into a
-    blocking document-generation function. The synchronous function runs
-    on asyncio's default thread pool while the event loop stays free to
-    serve health probes, pings, and concurrent requests.
-
-    Args:
-        func: The blocking function to execute.
-        *args: Positional arguments forwarded to ``func``.
-        **kwargs: Keyword arguments forwarded to ``func``.
-
-    Returns:
-        Whatever ``func`` returns, awaited from the thread.
-
-    Raises:
-        Any exception ``func`` raises is re-raised in the calling
-        coroutine after being marshalled back from the worker thread.
-    """
-    # functools.partial binds kwargs cleanly; asyncio.to_thread accepts
-    # *args/**kwargs directly, but going through partial keeps the call
-    # site readable and makes the closure easy to log if needed.
-    bound = functools.partial(func, *args, **kwargs)
-    return await asyncio.to_thread(bound)
-
-# Initialize config and logging
+# Initialize config and logging (must come before run_blocking, which reads
+# config.run_blocking_by_asyncio_thread_enabled at call time)
 config = get_config()
 logger = logging.getLogger(__name__)
 
@@ -93,6 +32,30 @@ if config.api_key:
     logger.info("[auth] API key authentication enabled")
 else:
     logger.info("[auth] No API_KEY set – authentication disabled")
+
+
+# ---------------------------------------------------------------------------
+# Async-safe wrapper for blocking document-generation calls
+# ---------------------------------------------------------------------------
+# `run_blocking()` is imported from `async_runner` (above). It lives in its
+# own module so dynamically-registered tool modules (dynamic_docx_tools,
+# dynamic_email_tools) can import it without creating a circular dependency
+# back through this `main` module. See `async_runner.py` for the full
+# rationale, the EKS failure mode it addresses, and the meaning of the
+# `RUN_BLOCKING_BY_ASYNCIO_THREAD_ENABLED` environment variable.
+#
+# All MCP tool handlers — both the static ones declared below and the
+# dynamic ones registered from YAML — uniformly write
+# `await run_blocking(sync_func, ...)`. The helper decides at call time
+# whether to dispatch the work to a worker thread (when enabled) or to
+# run it inline on the event loop (when disabled, legacy behaviour).
+# ---------------------------------------------------------------------------
+
+logger.info(
+    "[run_blocking] thread-offload %s (RUN_BLOCKING_BY_ASYNCIO_THREAD_ENABLED=%s)",
+    "ENABLED" if config.run_blocking_by_asyncio_thread_enabled else "DISABLED",
+    str(config.run_blocking_by_asyncio_thread_enabled).lower(),
+)
 
 
 # ---------------------------------------------------------------------------
