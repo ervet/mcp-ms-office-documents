@@ -333,6 +333,44 @@ def process_list_items(lines, start_idx, doc, is_ordered=False, level=0,
             else:
                 break
 
+    # ---------------------------------------------------------------------
+    # Forward-progress guarantee
+    # ---------------------------------------------------------------------
+    # If we never advanced ``i``, the caller's outer dispatch loop will
+    # re-detect the same line as a list and call us again with the same
+    # arguments — an infinite loop.
+    #
+    # This happens when the caller (``markdown_to_word``) made its match
+    # decision on the FULLY STRIPPED line, but this function's level
+    # check uses the ORIGINAL line's indent. They can disagree: a line
+    # like ``"   1. item"`` strips to ``"1. item"`` (matches
+    # ``ORDERED_LIST_PATTERN``) but its indent of 3 makes
+    # ``current_level=1``, which mismatches the requested ``level=0``,
+    # so the loop breaks before consuming anything.
+    #
+    # To guarantee both forward progress AND preserve the user's
+    # content, render the offending line as a plain paragraph (same
+    # treatment ``markdown_to_word`` gives any unrecognised line) and
+    # advance ``i`` past it. This branch is a no-op on the happy path
+    # (where ``i`` was advanced inside the loop) and on every recursive
+    # call (where ``current_level == level`` is established by the
+    # caller before recursing, so the inner first iteration cannot
+    # trigger this fallback).
+    if i == start_idx:
+        original_line = lines[start_idx]
+        stripped_line = original_line.strip()
+        logger.warning(
+            "process_list_items: no progress at line %d (%r) for level=%d; "
+            "rendering as a plain paragraph to guarantee forward progress",
+            start_idx, stripped_line, level,
+        )
+        paragraph = doc.add_paragraph()
+        parse_inline_formatting(stripped_line, paragraph)
+        if return_elements:
+            elements.append(paragraph._p)
+            doc._body._body.remove(paragraph._p)
+        i = start_idx + 1
+
     return i, elements
 
 
