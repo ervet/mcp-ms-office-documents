@@ -272,6 +272,98 @@ class TestInlineFormatting:
 
 
 # =============================================================================
+# HTML Entity Tests
+# =============================================================================
+
+
+class TestHtmlEntities:
+    """Tests for HTML entity decoding in inline text."""
+
+    def test_nbsp_decoded(self):
+        """Test that &nbsp; becomes a non-breaking space character."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("Hello&nbsp;World", p)
+        assert p.text == "Hello\u00a0World"
+
+    def test_typographic_dashes(self):
+        """Test en-dash and em-dash entity decoding."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("2020&ndash;2025 &mdash; a range", p)
+        assert "\u2013" in p.text  # en-dash
+        assert "\u2014" in p.text  # em-dash
+
+    def test_ellipsis(self):
+        """Test &hellip; becomes … character."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("Wait for it&hellip;", p)
+        assert p.text == "Wait for it\u2026"
+
+    def test_symbols(self):
+        """Test &copy; &reg; &trade; are decoded."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("&copy; 2026 Brand&trade; Product&reg;", p)
+        assert "\u00a9" in p.text  # ©
+        assert "\u2122" in p.text  # ™
+        assert "\u00ae" in p.text  # ®
+
+    def test_smart_quotes(self):
+        """Test smart quote entities are decoded."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("&ldquo;Hello&rdquo; and &lsquo;Hi&rsquo;", p)
+        assert "\u201c" in p.text  # "
+        assert "\u201d" in p.text  # "
+        assert "\u2018" in p.text  # '
+        assert "\u2019" in p.text  # '
+
+    def test_math_symbols(self):
+        """Test &times; &divide; &plusmn; &deg; are decoded."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("5 &times; 3 &divide; 2 &plusmn; 1&deg;", p)
+        assert "\u00d7" in p.text  # ×
+        assert "\u00f7" in p.text  # ÷
+        assert "\u00b1" in p.text  # ±
+        assert "\u00b0" in p.text  # °
+
+    def test_euro_sign(self):
+        """Test &euro; is decoded."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("Price: &euro;100", p)
+        assert p.text == "Price: \u20ac100"
+
+    def test_bullet(self):
+        """Test &bull; is decoded."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("Item A &bull; Item B", p)
+        assert "\u2022" in p.text
+
+    def test_dangerous_entities_not_decoded(self):
+        """Test that &lt; &gt; &amp; are NOT decoded (would break markdown)."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("&lt;center&gt; &amp; &gt;quote", p)
+        assert "&lt;" in p.text
+        assert "&gt;" in p.text
+        assert "&amp;" in p.text
+
+    def test_entities_with_formatting(self):
+        """Test entities work correctly alongside markdown formatting."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("**Price:&nbsp;&euro;50** &mdash; *tax&nbsp;incl.*", p)
+        assert "\u00a0" in p.text
+        assert "\u20ac" in p.text
+        assert "\u2014" in p.text
+
+
+# =============================================================================
 # Block Quote Tests
 # =============================================================================
 
