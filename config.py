@@ -263,6 +263,33 @@ class Config(BaseModel):
         default=None,
         description="API key for authenticating incoming requests. None means no auth.",
     )
+    run_blocking_by_asyncio_thread_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True (default), MCP tool handlers dispatch their "
+            "synchronous document-generation work to a bounded worker "
+            "thread pool, keeping the FastMCP event loop free to serve "
+            "health probes and concurrent requests. When False, tools "
+            "run inline on the event loop — the original blocking "
+            "behaviour (useful only for local debugging or to confirm a "
+            "regression is caused by threading). Toggled via the "
+            "RUN_BLOCKING_BY_ASYNCIO_THREAD_ENABLED environment variable."
+        ),
+    )
+    run_blocking_max_workers: int = Field(
+        default=4,
+        gt=0,
+        description=(
+            "Maximum concurrent worker threads in the bounded "
+            "ThreadPoolExecutor used by run_blocking(). Lower values "
+            "reduce GIL contention for CPU-bound work (markdown parsing); "
+            "higher values allow more concurrent I/O-bound work (S3 "
+            "upload). The default of 4 is tuned for 1 vCPU EKS pods: one "
+            "thread doing CPU-bound parsing under the GIL while up to "
+            "three others handle I/O. Tune via the "
+            "RUN_BLOCKING_MAX_WORKERS environment variable."
+        ),
+    )
 
     @staticmethod
     def _parse_bool(value: Optional[str]) -> bool:
@@ -341,8 +368,34 @@ class Config(BaseModel):
         # API key authentication (optional – empty/missing means no auth)
         raw_api_key = (os.environ.get("API_KEY") or "").strip() or None
 
+        # Toggle for thread-pool offload of blocking tool work. Default
+        # True — when the env var is absent or empty we treat it as
+        # "unset, use default". Set the var to "false"/"0"/"no"/"off" to
+        # explicitly disable (e.g. for local debugging).
+        raw_offload = os.environ.get("RUN_BLOCKING_BY_ASYNCIO_THREAD_ENABLED")
+        if raw_offload is None or not raw_offload.strip():
+            run_blocking_by_asyncio_thread_enabled = True
+        else:
+            run_blocking_by_asyncio_thread_enabled = cls._parse_bool(raw_offload)
+
+        # Bounded executor size. Invalid / non-positive values silently
+        # fall back to the default (4) — tuned for 1 vCPU EKS pods.
+        raw_workers = os.environ.get("RUN_BLOCKING_MAX_WORKERS")
         try:
-            return cls(logging=logging_settings, storage=storage_settings, api_key=raw_api_key)
+            run_blocking_max_workers = int(raw_workers) if raw_workers is not None and raw_workers.strip() else 4
+            if run_blocking_max_workers < 1:
+                run_blocking_max_workers = 4
+        except (ValueError, TypeError):
+            run_blocking_max_workers = 4
+
+        try:
+            return cls(
+                logging=logging_settings,
+                storage=storage_settings,
+                api_key=raw_api_key,
+                run_blocking_by_asyncio_thread_enabled=run_blocking_by_asyncio_thread_enabled,
+                run_blocking_max_workers=run_blocking_max_workers,
+            )
         except ValidationError as e:
             # Wrap Pydantic validation errors in a simpler exception for callers
             raise ValueError(f"Invalid configuration: {e}")

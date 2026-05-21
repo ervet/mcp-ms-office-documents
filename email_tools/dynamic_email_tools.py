@@ -20,6 +20,7 @@ from pydantic import Field, create_model
 from fastmcp import FastMCP
 from upload_tools import upload_file
 from template_utils import find_email_template
+from async_runner import run_blocking
 from fastmcp.exceptions import ToolError
 
 
@@ -116,8 +117,13 @@ def register_email_template_tools_from_yaml(mcp: FastMCP, yaml_path: Path) -> No
 
             renderer = pystache.Renderer(file_encoding="utf-8")
 
+            # Tool body is synchronous and blocking (mustache rendering,
+            # MIME construction, synchronous upload). Wrap it in an
+            # `async def` that dispatches through `run_blocking()` so
+            # behaviour follows the RUN_BLOCKING_BY_ASYNCIO_THREAD_ENABLED
+            # flag uniformly with the rest of the tools.
             def make_tool_fn(_model=model, _html=html_source, _renderer=renderer, _name=name):
-                def tool_impl(data):
+                def _sync_impl(data):
                     try:
                         payload = data.model_dump()
                         safe_payload = {k: ("" if v is None else v) for k, v in payload.items()}
@@ -165,6 +171,9 @@ def register_email_template_tools_from_yaml(mcp: FastMCP, yaml_path: Path) -> No
                     except Exception as e:
                         logger.error(f"[dynamic-email] Unexpected error in tool '{_name}': {e}", exc_info=True)
                         raise ToolError(f"Error generating email from template '{_name}': {e}")
+
+                async def tool_impl(data):
+                    return await run_blocking(_sync_impl, data)
 
                 tool_impl.__annotations__['data'] = _model  # type: ignore[index]
                 tool_impl.__annotations__['return'] = str  # type: ignore[index]

@@ -1,7 +1,8 @@
+from typing import Annotated, List, Dict, Optional, Literal
+
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
-from typing import Annotated, List, Dict, Optional, Literal
 from xlsx_tools import markdown_to_excel
 from docx_tools import markdown_to_word
 from docx_tools.dynamic_docx_tools import register_docx_template_tools_from_yaml
@@ -12,11 +13,16 @@ from pathlib import Path
 from config import get_config
 from xml_tools import create_xml_file
 from middleware import ApiKeyAuthMiddleware
+from async_runner import run_blocking
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
 
 import logging
 mcp = FastMCP("MCP Office Documents")
 
-# Initialize config and logging
+
+# Initialize config and logging (must come before run_blocking, which reads
+# config.run_blocking_by_asyncio_thread_enabled at call time)
 config = get_config()
 logger = logging.getLogger(__name__)
 
@@ -26,6 +32,72 @@ if config.api_key:
     logger.info("[auth] API key authentication enabled")
 else:
     logger.info("[auth] No API_KEY set – authentication disabled")
+
+
+# ---------------------------------------------------------------------------
+# Async-safe wrapper for blocking document-generation calls
+# ---------------------------------------------------------------------------
+# `run_blocking()` is imported from `async_runner` (above). It lives in its
+# own module so dynamically-registered tool modules (dynamic_docx_tools,
+# dynamic_email_tools) can import it without creating a circular dependency
+# back through this `main` module. See `async_runner.py` for the full
+# rationale, the EKS failure mode it addresses, and the meaning of the
+# `RUN_BLOCKING_BY_ASYNCIO_THREAD_ENABLED` environment variable.
+#
+# All MCP tool handlers — both the static ones declared below and the
+# dynamic ones registered from YAML — uniformly write
+# `await run_blocking(sync_func, ...)`. The helper decides at call time
+# whether to dispatch the work to a worker thread (when enabled) or to
+# run it inline on the event loop (when disabled, legacy behaviour).
+# ---------------------------------------------------------------------------
+
+logger.info(
+    "[run_blocking] thread-offload %s (RUN_BLOCKING_BY_ASYNCIO_THREAD_ENABLED=%s)",
+    "ENABLED" if config.run_blocking_by_asyncio_thread_enabled else "DISABLED",
+    str(config.run_blocking_by_asyncio_thread_enabled).lower(),
+)
+
+
+# ---------------------------------------------------------------------------
+# Kubernetes health-check endpoints
+# ---------------------------------------------------------------------------
+# These plain HTTP routes are registered at the Starlette layer (via
+# FastMCP's @custom_route) and therefore sit OUTSIDE the MCP protocol
+# middleware stack — they intentionally bypass the API-key auth middleware
+# so kubelet can poll them without credentials.
+#
+# Why HTTP (not TCP) probes?
+#   A TCP probe only verifies the socket accepts a connection. If the
+#   Python process is wedged but the listener is still bound, the kubelet
+#   never restarts the pod. An HTTP probe forces an actual response from
+#   the application, catching "alive port, dead process" failures.
+#
+# Probes (see k8s deployment manifest):
+#   /healthz — startupProbe   (pod has started)
+#   /readyz — readinessProbe (pod is ready to receive traffic)
+#   /livez — livenessProbe  (pod is alive; restart on failure)
+#
+# Each endpoint returns 200 OK with a short plain-text body. If the server
+# event loop is wedged, the request will time out and kubelet will mark
+# the probe as failed.
+# ---------------------------------------------------------------------------
+
+@mcp.custom_route("/healthz", methods=["GET"])
+async def health_startup(request: Request) -> PlainTextResponse:
+    """Startup probe — returns 200 OK once the HTTP server is accepting requests."""
+    return PlainTextResponse("ok", status_code=200)
+
+
+@mcp.custom_route("/readyz", methods=["GET"])
+async def health_ready(request: Request) -> PlainTextResponse:
+    """Readiness probe — returns 200 OK when the server can serve traffic."""
+    return PlainTextResponse("ready", status_code=200)
+
+
+@mcp.custom_route("/livez", methods=["GET"])
+async def health_live(request: Request) -> PlainTextResponse:
+    """Liveness probe — returns 200 OK while the event loop is responsive."""
+    return PlainTextResponse("alive", status_code=200)
 
 # Look for dynamic email templates in production and local locations.
 # Production (container): /app/config/email_templates.yaml
@@ -107,7 +179,7 @@ async def create_excel_document(
     logger.info("Converting markdown to Excel document")
 
     try:
-        result = markdown_to_excel(markdown_content, file_name=file_name)
+        result = await run_blocking(markdown_to_excel, markdown_content, file_name=file_name)
         logger.info("Excel document uploaded successfully")
         return result
     except Exception as e:
@@ -171,7 +243,8 @@ async def create_word_document(
     logger.info("Converting markdown to Word document")
 
     try:
-        result = markdown_to_word(
+        result = await run_blocking(
+            markdown_to_word,
             markdown_content,
             title=title,
             author=author,
@@ -219,7 +292,7 @@ All slides support optional 'speaker_notes': str field."""
     logger.info(f"Creating PowerPoint presentation with {len(slides)} slides in {format} format")
 
     try:
-        result = create_presentation(slides, format, file_name=file_name)
+        result = await run_blocking(create_presentation, slides, format, file_name=file_name)
         logger.info(f"PowerPoint presentation created: {result}")
         return result
     except Exception as e:
@@ -249,7 +322,8 @@ async def create_email_draft(
     logger.info(f"Creating email draft with subject: {subject}")
 
     try:
-        result = create_eml(
+        result = await run_blocking(
+            create_eml,
             to=to,
             cc=cc,
             bcc=bcc,
@@ -283,8 +357,8 @@ async def create_xml_document(
     logger.info("Creating XML file")
 
     try:
-        result = create_xml_file(xml_content, file_name=file_name)
-        logger.info("XML file created successfully.")
+        result = await run_blocking(create_xml_file, xml_content, file_name=file_name)
+        logger.info(f"XML file created successfully.")
         return result
     except Exception as e:
         logger.error(f"Error creating XML file: {e}", exc_info=True)

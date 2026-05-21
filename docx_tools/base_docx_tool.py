@@ -1,6 +1,5 @@
 import io
 import logging
-import re
 from docx import Document
 
 from upload_tools import upload_file
@@ -13,8 +12,10 @@ from .helpers import (
     add_horizontal_line,
     add_image_to_doc,
     IMAGE_PATTERN,
+    ORDERED_LIST_PATTERN,
     PAGE_BREAK_PATTERN,
     HORIZONTAL_LINE_PATTERN,
+    UNORDERED_LIST_PATTERN,
     detect_alignment,
     process_alignment_block,
     set_header_footer,
@@ -62,6 +63,9 @@ def markdown_to_word(markdown_content, title=None, author=None, subject=None,
 
     # Split content into lines, but preserve line breaks within paragraphs
     lines = markdown_content.split('\n')
+    # Cache len(lines) once — the list is not mutated inside the parsing
+    # loop; this removes a function call per iteration in two nested loops.
+    n = len(lines)
     i = 0
 
     # Simple parsing counters for summary
@@ -73,16 +77,19 @@ def markdown_to_word(markdown_content, title=None, author=None, subject=None,
     paragraphs_count = 0
 
     try:
-        while i < len(lines):
+        while i < n:
             line = lines[i]
 
-            # Handle multiple empty lines (preserve spacing)
+            # Handle multiple empty lines (preserve spacing).
+            # The outer `if` already established that lines[i] is empty;
+            # initialise the counter to 1 and advance once before entering
+            # the inner loop so we don't re-strip the same line.
             if not line.strip():
-                empty_line_count = 0
-                start_empty = i
+                empty_line_count = 1
+                i += 1
 
-                # Count consecutive empty lines
-                while i < len(lines) and not lines[i].strip():
+                # Count consecutive empty lines that follow
+                while i < n and not lines[i].strip():
                     empty_line_count += 1
                     i += 1
 
@@ -99,7 +106,7 @@ def markdown_to_word(markdown_content, title=None, author=None, subject=None,
             if line.endswith('  '):
                 # Collect lines that are part of the same paragraph (connected by line breaks)
                 paragraph_lines = []
-                while i < len(lines):
+                while i < n:
                     current_line = lines[i]
                     if not current_line.strip():
                         break
@@ -114,8 +121,11 @@ def markdown_to_word(markdown_content, title=None, author=None, subject=None,
                 first_line = paragraph_lines[0].strip()
 
                 if first_line.startswith('#'):
-                    header_level = len(first_line) - len(first_line.lstrip('#'))
-                    header_text = first_line.lstrip('#').strip()
+                    # Compute lstrip once and reuse for both the level (count
+                    # of leading '#') and the header text.
+                    stripped_hashes = first_line.lstrip('#')
+                    header_level = len(first_line) - len(stripped_hashes)
+                    header_text = stripped_hashes.strip()
                     heading = doc.add_heading('', level=min(header_level, 6))
                     parse_inline_formatting(header_text, heading)
                     headers_count += 1
@@ -135,8 +145,10 @@ def markdown_to_word(markdown_content, title=None, author=None, subject=None,
             line = line.strip()
 
             if line.startswith('#'):
-                header_level = len(line) - len(line.lstrip('#'))
-                header_text = line.lstrip('#').strip()
+                # Compute lstrip once (see comment above).
+                stripped_hashes = line.lstrip('#')
+                header_level = len(line) - len(stripped_hashes)
+                header_text = stripped_hashes.strip()
                 heading = doc.add_heading('', level=min(header_level, 6))
                 parse_inline_formatting(header_text, heading)
                 headers_count += 1
@@ -150,11 +162,11 @@ def markdown_to_word(markdown_content, title=None, author=None, subject=None,
                     tables_count += 1
                     logger.debug(f"Added table with {len(table_data)} rows")
 
-            elif re.match(r'^\d+\.\s+', line):
+            elif ORDERED_LIST_PATTERN.match(line):
                 i, _ = process_list_items(lines, i, doc, True, 0)
                 ordered_lists += 1
 
-            elif re.match(r'^[-*+]\s+', line):
+            elif UNORDERED_LIST_PATTERN.match(line):
                 i, _ = process_list_items(lines, i, doc, False, 0)
                 unordered_lists += 1
 
