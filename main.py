@@ -202,6 +202,7 @@ async def create_word_document(
         "- Ordered lists: 1. item, 2. item; nest with 3-space indent\n"
         "- Tables: | H1 | H2 |\\n|---|---|\\n| C1 | C2 | (cells support inline formatting and <br> for new paragraph; use :---|:---:|---: in separator for left/center/right alignment)\n"
         "- Borderless table: add <!-- borderless --> on the line before the table (useful for bilingual/parallel layouts)\n"
+        "- Column widths: add <!-- widths: 30 70 --> before the table (proportional values, any number of columns)\n"
         "- Block quotes: > text (supports inline formatting)\n"
         "- Page break: --- (three+ dashes alone on a line — starts new page)\n"
         "- Horizontal line: *** (three+ asterisks alone on a line — visual separator)\n"

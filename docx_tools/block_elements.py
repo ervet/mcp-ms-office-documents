@@ -95,13 +95,15 @@ def _remove_table_borders(table):
         tblPr.remove(existing)
     tblPr.append(borders)
 
-def add_table_to_doc(table_data, doc, col_alignments=None, borderless=False):
+def add_table_to_doc(table_data, doc, col_alignments=None, borderless=False, col_widths=None):
     """Add table data to Word document.
     Args:
         table_data: List of rows, each a list of cell text strings.
         doc: python-docx Document instance.
         col_alignments: Optional list of WD_ALIGN_PARAGRAPH per column.
         borderless: If True, remove all table borders (invisible table).
+        col_widths: Optional list of proportional width values per column.
+            Values are normalized to sum to 100% of available page width.
     Returns the created ``Table`` object, or ``None`` when the table could
     not be created (empty data or exception).
     """
@@ -121,6 +123,14 @@ def add_table_to_doc(table_data, doc, col_alignments=None, borderless=False):
             return None
     if borderless:
         _remove_table_borders(word_table)
+    # Apply column widths if specified
+    if col_widths and len(col_widths) >= cols:
+        total = sum(col_widths[:cols])
+        page_width = 6.5  # usable width in inches (standard letter with 1" margins)
+        for j in range(cols):
+            width_inches = (col_widths[j] / total) * page_width
+            for row in word_table.rows:
+                row.cells[j].width = Inches(width_inches)
     for i, row_data in enumerate(table_data):
         for j, cell_text in enumerate(row_data):
             if j < cols:

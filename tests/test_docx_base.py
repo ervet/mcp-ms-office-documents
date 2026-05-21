@@ -253,6 +253,57 @@ class TestTables:
         for para in doc.paragraphs:
             assert '<!--' not in para.text
 
+    def test_table_column_widths(self):
+        """Test that <!-- widths: ... --> sets proportional column widths."""
+        markdown = """<!-- widths: 30 70 -->
+| Narrow | Wide |
+|--------|------|
+| A      | This column should be wider |
+"""
+        doc = save_test_document(markdown, "table_col_widths_2col.docx")
+        assert doc is not None
+        table = doc.tables[0]
+        # Column 0 should be narrower than column 1
+        col0_width = table.cell(0, 0).width
+        col1_width = table.cell(0, 1).width
+        assert col1_width > col0_width
+
+    def test_table_column_widths_3col(self):
+        """Test column widths with 3 columns."""
+        markdown = """<!-- widths: 20 50 30 -->
+| Small | Large | Medium |
+|-------|-------|--------|
+| A     | B     | C      |
+"""
+        doc = save_test_document(markdown, "table_col_widths_3col.docx")
+        assert doc is not None
+        table = doc.tables[0]
+        col0_width = table.cell(0, 0).width
+        col1_width = table.cell(0, 1).width
+        col2_width = table.cell(0, 2).width
+        # col1 (50) > col2 (30) > col0 (20)
+        assert col1_width > col2_width
+        assert col2_width > col0_width
+
+    def test_table_combined_directives(self):
+        """Test borderless + widths directives together."""
+        markdown = """<!-- borderless -->
+<!-- widths: 40 60 -->
+| English | French |
+|---------|--------|
+| Hello   | Bonjour |
+| Goodbye | Au revoir |
+"""
+        doc = save_test_document(markdown, "table_combined_directives.docx")
+        assert doc is not None
+        table = doc.tables[0]
+        # Verify borderless
+        tblPr = table._tbl.tblPr
+        borders = tblPr.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tblBorders')
+        assert borders is not None
+        # Verify widths applied (col1 wider than col0)
+        assert table.cell(0, 1).width > table.cell(0, 0).width
+
     def test_table_cell_line_breaks(self):
         """Test that <br> in table cells creates multiple paragraphs."""
         markdown = """| Header 1 | Header 2 |

@@ -120,15 +120,26 @@ def process_markdown_block(doc, lines, start_idx, return_element=True):
         if TABLE_LINE_PATTERN.match(stripped):
             table_data, col_alignments, next_idx = parse_table(lines, start_idx)
             if table_data:
-                # Check if previous line is a <!-- borderless --> directive
+                # Check preceding lines for table directives
                 borderless = False
-                if start_idx > 0:
-                    prev = lines[start_idx - 1].strip().lower()
+                col_widths = None
+                for lookback in range(1, 3):  # check up to 2 lines back
+                    if start_idx - lookback < 0:
+                        break
+                    prev = lines[start_idx - lookback].strip().lower()
                     if prev in ('<!-- borderless -->', '<!--borderless-->'):
                         borderless = True
+                    elif prev.startswith('<!-- widths:') and prev.endswith('-->'):
+                        # Parse <!-- widths: 30 70 --> or <!-- widths: 20 50 30 -->
+                        inner = prev[len('<!-- widths:'):-len('-->')].strip()
+                        try:
+                            col_widths = [float(v) for v in inner.split()]
+                        except ValueError:
+                            col_widths = None
                 word_table = add_table_to_doc(table_data, doc,
                                              col_alignments=col_alignments,
-                                             borderless=borderless)
+                                             borderless=borderless,
+                                             col_widths=col_widths)
                 if word_table is not None:
                     _collect(word_table._tbl)
                 return next_idx, elements
