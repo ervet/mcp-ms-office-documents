@@ -3,12 +3,8 @@ import logging
 from docx import Document
 
 from upload_tools import upload_file
-from .helpers import (
-    load_templates,
-    process_markdown_content,
-    set_header_footer,
-    add_toc,
-)
+from .document_features import load_templates, set_header_footer, add_toc
+from .markdown_processor import process_markdown_content
 
 logger = logging.getLogger(__name__)
 

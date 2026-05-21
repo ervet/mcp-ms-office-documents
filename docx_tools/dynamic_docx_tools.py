@@ -44,11 +44,9 @@ from fastmcp import FastMCP
 from upload_tools import upload_file
 from template_utils import find_file_in_template_dirs
 from async_runner import run_blocking
-from .helpers import (
-    parse_inline_formatting,
-    contains_block_markdown,
-    process_markdown_content,
-)
+from .inline_formatting import parse_inline_formatting
+from .patterns import contains_block_markdown
+from .markdown_processor import process_markdown_content
 from fastmcp.exceptions import ToolError
 
 

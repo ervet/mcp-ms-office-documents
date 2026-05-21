@@ -18,7 +18,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from docx_tools.base_docx_tool import _markdown_to_doc
-from docx_tools.helpers import parse_inline_formatting
+from docx_tools.inline_formatting import parse_inline_formatting
 
 # Output directory for test files
 OUTPUT_DIR = Path(__file__).parent / "output" / "docx"
