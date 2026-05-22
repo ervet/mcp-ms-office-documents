@@ -44,11 +44,9 @@ from fastmcp import FastMCP
 from upload_tools import upload_file
 from template_utils import find_file_in_template_dirs
 from async_runner import run_blocking
-from .helpers import (
-    parse_inline_formatting,
-    contains_block_markdown,
-    process_markdown_block,
-)
+from .inline_formatting import parse_inline_formatting
+from .patterns import contains_block_markdown
+from .markdown_processor import process_markdown_content
 from fastmcp.exceptions import ToolError
 
 
@@ -75,13 +73,11 @@ def _insert_markdown_content_after_paragraph(
     paragraph: Paragraph,
     content: str
 ) -> None:
-    """Insert markdown content (including lists and headings) after a paragraph.
+    """Insert markdown content (including lists, headings, soft breaks) after a paragraph.
 
-    This function processes block-level markdown content including:
-    - Headings (# heading)
-    - Regular paragraphs with inline formatting
-    - Ordered lists (1. item)
-    - Unordered lists (- item, * item, + item)
+    Uses the unified process_markdown_content() which handles all markdown
+    features: empty-line spacing, soft line breaks (trailing two spaces),
+    and all block-level elements.
 
     Args:
         doc: The Word document
@@ -89,32 +85,16 @@ def _insert_markdown_content_after_paragraph(
         content: The markdown content to insert
     """
     try:
-        lines = content.split('\n')
-        i = 0
+        # Process content and get detached elements
+        new_elements = process_markdown_content(doc, content, return_elements=True)
 
-        # Find the paragraph's position in the document body
+        # Find the paragraph's position in the document body and insert after it
         body = doc._body._body
         p_element = paragraph._p
         para_idx = list(body).index(p_element)
 
-        # Track how many elements we've inserted
-        inserted_count = 0
-
-        while i < len(lines):
-            line = lines[i]
-            stripped = line.strip()
-
-            if not stripped:
-                i += 1
-                continue
-
-            # Use shared helper to process the markdown block
-            i, new_elements = process_markdown_block(doc, lines, i, return_element=True)
-
-            # Insert elements at the correct position
-            for elem in new_elements:
-                body.insert(para_idx + 1 + inserted_count, elem)
-                inserted_count += 1
+        for offset, elem in enumerate(new_elements, start=1):
+            body.insert(para_idx + offset, elem)
     except Exception as e:
         logger.error("Failed to insert markdown content after paragraph: %s", e, exc_info=True)
 

@@ -65,7 +65,7 @@ sys.path.insert(0, str(project_root))
 from docx import Document  # noqa: E402
 
 from docx_tools.base_docx_tool import markdown_to_word  # noqa: E402
-from docx_tools.helpers import process_list_items  # noqa: E402
+from docx_tools.block_elements import process_list_items  # noqa: E402
 
 
 # Generous wall-clock budget. Real markdown_to_word on these tiny inputs

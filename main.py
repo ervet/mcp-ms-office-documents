@@ -200,7 +200,9 @@ async def create_word_document(
         "- Headings: # H1, ## H2, ### H3, #### H4, ##### H5, ###### H6\n"
         "- Unordered lists: - item (or * or +); nest with 3-space indent\n"
         "- Ordered lists: 1. item, 2. item; nest with 3-space indent\n"
-        "- Tables: | H1 | H2 |\\n|---|---|\\n| C1 | C2 | (cells support inline formatting)\n"
+        "- Tables: | H1 | H2 |\\n|---|---|\\n| C1 | C2 | (cells support inline formatting and <br> for new paragraph; use :---|:---:|---: in separator for left/center/right alignment)\n"
+        "- Borderless table: add <!-- borderless --> on the line before the table (useful for bilingual/parallel layouts)\n"
+        "- Column widths: add <!-- widths: 30 70 --> before the table (proportional values, any number of columns)\n"
         "- Block quotes: > text (supports inline formatting)\n"
         "- Page break: --- (three+ dashes alone on a line — starts new page)\n"
         "- Horizontal line: *** (three+ asterisks alone on a line — visual separator)\n"
@@ -210,6 +212,8 @@ async def create_word_document(
         "- **bold**, *italic*, ***bold italic***\n"
         "- ~~strikethrough~~, __underline__ (double underscore — NOT bold)\n"
         "- `code` (Courier New font)\n"
+        "- ^superscript^ (e.g. x^2^), ~subscript~ (e.g. H~2~O)\n"
+        "- ==highlighted text== (yellow background)\n"
         "- [link text](https://url)\n"
         "- Nesting: **bold with *italic* inside**, *italic with **bold** inside*\n"
         "- Combinations: **~~bold strikethrough~~**, **__bold underline__**, *~~italic strikethrough~~*\n"
@@ -358,7 +362,7 @@ async def create_xml_document(
 
     try:
         result = await run_blocking(create_xml_file, xml_content, file_name=file_name)
-        logger.info(f"XML file created successfully.")
+        logger.info("XML file created successfully.")
         return result
     except Exception as e:
         logger.error(f"Error creating XML file: {e}", exc_info=True)

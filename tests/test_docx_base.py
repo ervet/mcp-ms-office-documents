@@ -17,23 +17,8 @@ import pytest
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-from docx_tools.helpers import (
-    parse_inline_formatting,
-    load_templates,
-    parse_table,
-    add_table_to_doc,
-    process_list_items,
-    add_horizontal_line,
-    add_image_to_doc,
-    IMAGE_PATTERN,
-    PAGE_BREAK_PATTERN,
-    HORIZONTAL_LINE_PATTERN,
-    detect_alignment,
-    process_alignment_block,
-    set_header_footer,
-    add_toc,
-)
-import re
+from docx_tools.base_docx_tool import _markdown_to_doc
+from docx_tools.inline_formatting import parse_inline_formatting
 
 # Output directory for test files
 OUTPUT_DIR = Path(__file__).parent / "output" / "docx"
@@ -51,130 +36,18 @@ def create_word_document(markdown_content: str, title=None, author=None,
                          include_toc=False) -> Document:
     """Convert Markdown to Word document and return the Document object.
 
-    This is a test-friendly version that returns the Document directly
-    instead of saving via upload_file.
+    Delegates to the production _markdown_to_doc function so tests exercise
+    the real code path rather than a divergent copy.
     """
-    path = load_templates()
-
-    if path:
-        doc = Document(path)
-    else:
-        doc = Document()
-
-    # Set document metadata
-    if title:
-        doc.core_properties.title = title
-    if author:
-        doc.core_properties.author = author
-    if subject:
-        doc.core_properties.subject = subject
-
-    # Insert TOC
-    if include_toc:
-        add_toc(doc)
-
-    # Set header and footer
-    if header_text:
-        set_header_footer(doc, header_text, 'header')
-    if footer_text:
-        set_header_footer(doc, footer_text, 'footer')
-
-    lines = markdown_content.split('\n')
-    i = 0
-
-    while i < len(lines):
-        line = lines[i]
-
-        if not line.strip():
-            i += 1
-            continue
-
-        # Check if this line ends with two spaces (line break)
-        if line.endswith('  '):
-            paragraph_lines = []
-            while i < len(lines):
-                current_line = lines[i]
-                if not current_line.strip():
-                    break
-                paragraph_lines.append(current_line)
-                i += 1
-                if not current_line.endswith('  '):
-                    break
-
-            full_text = '  \n'.join(paragraph_lines)
-            first_line = paragraph_lines[0].strip()
-
-            if first_line.startswith('#'):
-                header_level = len(first_line) - len(first_line.lstrip('#'))
-                header_text_val = first_line.lstrip('#').strip()
-                heading = doc.add_heading('', level=min(header_level, 6))
-                parse_inline_formatting(header_text_val, heading)
-            elif first_line.startswith('>'):
-                quote_text = full_text[1:].strip()
-                quote_paragraph = doc.add_paragraph()
-                quote_paragraph.style = 'Quote'
-                parse_inline_formatting(quote_text, quote_paragraph)
-            else:
-                paragraph = doc.add_paragraph()
-                parse_inline_formatting(full_text, paragraph)
-            continue
-
-        line = line.strip()
-
-        if line.startswith('#'):
-            header_level = len(line) - len(line.lstrip('#'))
-            header_text_val = line.lstrip('#').strip()
-            heading = doc.add_heading('', level=min(header_level, 6))
-            parse_inline_formatting(header_text_val, heading)
-            i += 1
-
-        elif line.startswith('|'):
-            table_data, i = parse_table(lines, i)
-            if table_data:
-                add_table_to_doc(table_data, doc)
-
-        elif re.match(r'^\d+\.\s+', line):
-            i, _ = process_list_items(lines, i, doc, True, 0)
-
-        elif re.match(r'^[-*+]\s+', line):
-            i, _ = process_list_items(lines, i, doc, False, 0)
-
-        elif PAGE_BREAK_PATTERN.match(line):
-            doc.add_page_break()
-            i += 1
-
-        elif HORIZONTAL_LINE_PATTERN.match(line):
-            add_horizontal_line(doc)
-            i += 1
-
-        elif (img_match := IMAGE_PATTERN.match(line)):
-            alt_text, url = img_match.groups()
-            add_image_to_doc(doc, url, alt_text)
-            i += 1
-
-        elif (align_result := detect_alignment(line)) is not None:
-            inner, alignment = align_result
-            if inner is not None:
-                paragraph = doc.add_paragraph()
-                paragraph.alignment = alignment
-                parse_inline_formatting(inner, paragraph)
-                i += 1
-            else:
-                i, _ = process_alignment_block(lines, i + 1, doc, alignment, return_elements=False)
-
-        elif line.startswith('>'):
-            quote_text = line[1:].strip()
-            quote_paragraph = doc.add_paragraph()
-            quote_paragraph.style = 'Quote'
-            parse_inline_formatting(quote_text, quote_paragraph)
-            i += 1
-
-        else:
-            paragraph = doc.add_paragraph()
-            parse_inline_formatting(line, paragraph)
-            i += 1
-
-    return doc
+    return _markdown_to_doc(
+        markdown_content,
+        title=title,
+        author=author,
+        subject=subject,
+        header_text=header_text,
+        footer_text=footer_text,
+        include_toc=include_toc,
+    )
 
 
 def save_test_document(markdown: str, filename: str) -> Document:
@@ -338,7 +211,7 @@ class TestTables:
         assert doc is not None
 
     def test_table_with_alignment(self):
-        """Test table with column alignment markers."""
+        """Test table with column alignment markers applied to cells."""
         markdown = """| Left | Center | Right |
 |:-----|:------:|------:|
 | L1   | C1     | R1    |
@@ -346,6 +219,116 @@ class TestTables:
 """
         doc = save_test_document(markdown, "table_aligned.docx")
         assert doc is not None
+        table = doc.tables[0]
+        # Header row + 2 data rows
+        assert len(table.rows) == 3
+        # Check alignment on data cells
+        # Left column (:---) — default, so alignment is None
+        assert table.cell(1, 0).paragraphs[0].alignment is None
+        # Center column (:---:)
+        assert table.cell(1, 1).paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.CENTER
+        # Right column (---:)
+        assert table.cell(1, 2).paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.RIGHT
+
+    def test_table_borderless(self):
+        """Test that <!-- borderless --> directive removes table borders."""
+        markdown = """<!-- borderless -->
+| English | French |
+|---------|--------|
+| Hello   | Bonjour |
+| Goodbye | Au revoir |
+"""
+        doc = save_test_document(markdown, "table_borderless.docx")
+        assert doc is not None
+        table = doc.tables[0]
+        # Verify borders are set to 'none'
+        tblPr = table._tbl.tblPr
+        borders = tblPr.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tblBorders')
+        assert borders is not None
+        # Check that all border elements have val='none'
+        for border in borders:
+            assert border.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val') == 'none'
+        # Verify the directive itself didn't create a paragraph
+        # (only the table should be in the doc body, no "<!-- borderless -->" text)
+        for para in doc.paragraphs:
+            assert '<!--' not in para.text
+
+    def test_table_column_widths(self):
+        """Test that <!-- widths: ... --> sets proportional column widths."""
+        markdown = """<!-- widths: 30 70 -->
+| Narrow | Wide |
+|--------|------|
+| A      | This column should be wider |
+"""
+        doc = save_test_document(markdown, "table_col_widths_2col.docx")
+        assert doc is not None
+        table = doc.tables[0]
+        # Column 0 should be narrower than column 1
+        col0_width = table.cell(0, 0).width
+        col1_width = table.cell(0, 1).width
+        assert col1_width > col0_width
+
+    def test_table_column_widths_3col(self):
+        """Test column widths with 3 columns."""
+        markdown = """<!-- widths: 20 50 30 -->
+| Small | Large | Medium |
+|-------|-------|--------|
+| A     | B     | C      |
+"""
+        doc = save_test_document(markdown, "table_col_widths_3col.docx")
+        assert doc is not None
+        table = doc.tables[0]
+        col0_width = table.cell(0, 0).width
+        col1_width = table.cell(0, 1).width
+        col2_width = table.cell(0, 2).width
+        # col1 (50) > col2 (30) > col0 (20)
+        assert col1_width > col2_width
+        assert col2_width > col0_width
+
+    def test_table_combined_directives(self):
+        """Test borderless + widths directives together."""
+        markdown = """<!-- borderless -->
+<!-- widths: 40 60 -->
+| English | French |
+|---------|--------|
+| Hello   | Bonjour |
+| Goodbye | Au revoir |
+"""
+        doc = save_test_document(markdown, "table_combined_directives.docx")
+        assert doc is not None
+        table = doc.tables[0]
+        # Verify borderless
+        tblPr = table._tbl.tblPr
+        borders = tblPr.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tblBorders')
+        assert borders is not None
+        # Verify widths applied (col1 wider than col0)
+        assert table.cell(0, 1).width > table.cell(0, 0).width
+
+    def test_table_cell_line_breaks(self):
+        """Test that <br> in table cells creates multiple paragraphs."""
+        markdown = """| Header 1 | Header 2 |
+|----------|----------|
+| Line one<br>Line two | Single line |
+| **Bold**<br>*Italic* | A<br/>B<br>C |
+"""
+        doc = save_test_document(markdown, "table_cell_line_breaks.docx")
+        assert doc is not None
+        # Find the table
+        table = doc.tables[0]
+        # First data row, first cell should have 2 paragraphs
+        cell_0_0 = table.cell(1, 0)
+        assert len(cell_0_0.paragraphs) == 2
+        assert cell_0_0.paragraphs[0].text == "Line one"
+        assert cell_0_0.paragraphs[1].text == "Line two"
+        # First data row, second cell should have 1 paragraph
+        cell_0_1 = table.cell(1, 1)
+        assert len(cell_0_1.paragraphs) == 1
+        # Second data row, second cell should have 3 paragraphs (A, B, C)
+        cell_1_1 = table.cell(2, 1)
+        assert len(cell_1_1.paragraphs) == 3
+        assert cell_1_1.paragraphs[0].text == "A"
+        assert cell_1_1.paragraphs[1].text == "B"
+        assert cell_1_1.paragraphs[2].text == "C"
 
 
 # =============================================================================
@@ -396,6 +379,98 @@ class TestInlineFormatting:
         markdown = r"This has \*asterisks\* and \**double asterisks\**."
         doc = save_test_document(markdown, "format_escaped.docx")
         assert doc is not None
+
+
+# =============================================================================
+# HTML Entity Tests
+# =============================================================================
+
+
+class TestHtmlEntities:
+    """Tests for HTML entity decoding in inline text."""
+
+    def test_nbsp_decoded(self):
+        """Test that &nbsp; becomes a non-breaking space character."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("Hello&nbsp;World", p)
+        assert p.text == "Hello\u00a0World"
+
+    def test_typographic_dashes(self):
+        """Test en-dash and em-dash entity decoding."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("2020&ndash;2025 &mdash; a range", p)
+        assert "\u2013" in p.text  # en-dash
+        assert "\u2014" in p.text  # em-dash
+
+    def test_ellipsis(self):
+        """Test &hellip; becomes … character."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("Wait for it&hellip;", p)
+        assert p.text == "Wait for it\u2026"
+
+    def test_symbols(self):
+        """Test &copy; &reg; &trade; are decoded."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("&copy; 2026 Brand&trade; Product&reg;", p)
+        assert "\u00a9" in p.text  # ©
+        assert "\u2122" in p.text  # ™
+        assert "\u00ae" in p.text  # ®
+
+    def test_smart_quotes(self):
+        """Test smart quote entities are decoded."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("&ldquo;Hello&rdquo; and &lsquo;Hi&rsquo;", p)
+        assert "\u201c" in p.text  # "
+        assert "\u201d" in p.text  # "
+        assert "\u2018" in p.text  # '
+        assert "\u2019" in p.text  # '
+
+    def test_math_symbols(self):
+        """Test &times; &divide; &plusmn; &deg; are decoded."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("5 &times; 3 &divide; 2 &plusmn; 1&deg;", p)
+        assert "\u00d7" in p.text  # ×
+        assert "\u00f7" in p.text  # ÷
+        assert "\u00b1" in p.text  # ±
+        assert "\u00b0" in p.text  # °
+
+    def test_euro_sign(self):
+        """Test &euro; is decoded."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("Price: &euro;100", p)
+        assert p.text == "Price: \u20ac100"
+
+    def test_bullet(self):
+        """Test &bull; is decoded."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("Item A &bull; Item B", p)
+        assert "\u2022" in p.text
+
+    def test_dangerous_entities_not_decoded(self):
+        """Test that &lt; &gt; &amp; are NOT decoded (would break markdown)."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("&lt;center&gt; &amp; &gt;quote", p)
+        assert "&lt;" in p.text
+        assert "&gt;" in p.text
+        assert "&amp;" in p.text
+
+    def test_entities_with_formatting(self):
+        """Test entities work correctly alongside markdown formatting."""
+        doc = Document()
+        p = doc.add_paragraph()
+        parse_inline_formatting("**Price:&nbsp;&euro;50** &mdash; *tax&nbsp;incl.*", p)
+        assert "\u00a0" in p.text
+        assert "\u20ac" in p.text
+        assert "\u2014" in p.text
 
 
 # =============================================================================
@@ -1695,5 +1770,49 @@ class TestUnderlineStrikethrough:
         markdown = "This has __underlined text__ in it."
         doc = save_test_document(markdown, "format_underline.docx")
         assert doc is not None
+
+    def test_superscript(self):
+        """Test superscript formatting with ^text^."""
+        markdown = "E = mc^2^ is famous."
+        doc = save_test_document(markdown, "format_superscript.docx")
+        assert doc is not None
+        para = doc.paragraphs[-1]
+        runs = para.runs
+        # Find the superscript run
+        super_run = next(r for r in runs if r.text == '2')
+        assert super_run.font.superscript is True
+
+    def test_subscript(self):
+        """Test subscript formatting with ~text~."""
+        markdown = "Water is H~2~O."
+        doc = save_test_document(markdown, "format_subscript.docx")
+        assert doc is not None
+        para = doc.paragraphs[-1]
+        runs = para.runs
+        sub_run = next(r for r in runs if r.text == '2')
+        assert sub_run.font.subscript is True
+
+    def test_highlight(self):
+        """Test highlight formatting with ==text==."""
+        from docx.enum.text import WD_COLOR_INDEX
+        markdown = "This is ==very important== text."
+        doc = save_test_document(markdown, "format_highlight.docx")
+        assert doc is not None
+        para = doc.paragraphs[-1]
+        runs = para.runs
+        hl_run = next(r for r in runs if r.text == 'very important')
+        assert hl_run.font.highlight_color == WD_COLOR_INDEX.YELLOW
+
+    def test_superscript_subscript_combined(self):
+        """Test super and subscript in the same paragraph."""
+        markdown = "x^2^ + y~i~ = z"
+        doc = save_test_document(markdown, "format_super_sub_combined.docx")
+        assert doc is not None
+        para = doc.paragraphs[-1]
+        runs = para.runs
+        super_run = next(r for r in runs if r.text == '2')
+        sub_run = next(r for r in runs if r.text == 'i')
+        assert super_run.font.superscript is True
+        assert sub_run.font.subscript is True
 
 

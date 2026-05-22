@@ -31,7 +31,7 @@ from docx_tools.dynamic_docx_tools import (
     _replace_placeholders_in_document,
     find_docx_template_by_name,
 )
-from docx_tools.helpers import contains_block_markdown
+from docx_tools.patterns import contains_block_markdown
 
 # Output directory for test files
 OUTPUT_DIR = Path(__file__).parent / "output" / "docx"
@@ -1532,7 +1532,7 @@ class TestHeaderFooterWithTemplate:
 
     def test_set_header_preserves_alignment(self):
         """Test that set_header_footer preserves existing paragraph alignment."""
-        from docx_tools.helpers import set_header_footer
+        from docx_tools.document_features import set_header_footer
 
         doc = Document()
         section = doc.sections[0]
@@ -1554,7 +1554,7 @@ class TestHeaderFooterWithTemplate:
 
     def test_set_footer_all_sections(self):
         """Test that set_header_footer updates all sections."""
-        from docx_tools.helpers import set_header_footer
+        from docx_tools.document_features import set_header_footer
 
         doc = Document()
         doc.add_paragraph("Section 1 content.")
@@ -1576,7 +1576,7 @@ class TestHeaderFooterWithTemplate:
 
     def test_set_header_replaces_existing_content(self):
         """Test that existing header content is replaced, not appended."""
-        from docx_tools.helpers import set_header_footer
+        from docx_tools.document_features import set_header_footer
 
         doc = Document()
         section = doc.sections[0]
@@ -1596,7 +1596,7 @@ class TestHeaderFooterWithTemplate:
 
     def test_set_header_with_page_fields(self):
         """Test header with page number tokens."""
-        from docx_tools.helpers import set_header_footer
+        from docx_tools.document_features import set_header_footer
 
         doc = Document()
         doc.add_paragraph("Body content for visual inspection.")
