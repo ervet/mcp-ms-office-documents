@@ -1,16 +1,19 @@
 """PowerPoint slide builder class.
 
 This module provides the PowerpointPresentation class which builds slides
-from structured data, combining helper mixins for text, tables, images, etc.
+from structured data using the SlideHelpers mixin for text, tables, images, etc.
 """
 
 import io
+import copy
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from pptx import Presentation
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Inches, Pt
+from pptx.oxml.ns import qn
+from pptx.oxml import parse_xml
 
 from template_utils import find_pptx_templates
 from .constants import (
@@ -20,35 +23,50 @@ from .constants import (
     TABLE_HEADER_FILL,
 )
 from .helpers import (
-    SlideHelperMixin, TextHelperMixin, TableHelperMixin, ImageHelperMixin,
+    SlideHelpers,
     parse_table_data, parse_color,
 )
+from .inline_formatting import has_inline_formatting, apply_inline_formatting
 from .chart_utils import add_chart_to_slide, ChartDataError
 
 logger = logging.getLogger(__name__)
 
 
-def _load_templates():
-    """Load presentation templates for 4:3 and 16:9 formats.
+# Cache for loaded template paths (resolved once at first use)
+_template_cache: Dict[str, Any] = {}
+
+
+def _get_templates():
+    """Get presentation templates for 4:3 and 16:9 formats (cached).
 
     Returns:
         Tuple of (path_4_3, path_16_9) template paths.
     """
-    t43, t169 = find_pptx_templates()
-    if not t43 or not t169:
-        logger.info("One or more PPT templates missing; using PowerPoint defaults")
-    return t43, t169
+    if "resolved" not in _template_cache:
+        t43, t169 = find_pptx_templates()
+        if not t43 or not t169:
+            logger.info("One or more PPT templates missing; using PowerPoint defaults")
+        _template_cache["4:3"] = t43
+        _template_cache["16:9"] = t169
+        _template_cache["resolved"] = True
+    return _template_cache.get("4:3"), _template_cache.get("16:9")
 
 
-class PowerpointPresentation(SlideHelperMixin, TextHelperMixin, TableHelperMixin, ImageHelperMixin):
+class PowerpointPresentation(SlideHelpers):
     """Builder class for creating PowerPoint presentations from structured data."""
 
-    def __init__(self, slides: List[Dict[str, Any]], format: str):
+    def __init__(self, slides: List[Dict[str, Any]], format: str,
+                 author: Optional[str] = None,
+                 footer_text: Optional[str] = None,
+                 show_slide_numbers: bool = False):
         """Initialize and build presentation.
 
         Args:
             slides: List of slide dictionaries.
             format: Presentation format ("4:3" or "16:9").
+            author: Author name stored in document metadata/properties.
+            footer_text: Optional footer text displayed on all slides.
+            show_slide_numbers: Whether to show slide numbers on all slides.
         """
         logger.info(f"Initializing PowerPoint: slides={len(slides)}, format={format}")
 
@@ -56,8 +74,14 @@ class PowerpointPresentation(SlideHelperMixin, TextHelperMixin, TableHelperMixin
             raise ValueError("At least one slide is required")
 
         self.presentation = self._create_presentation(format)
+        self._footer_text = footer_text
+        self._show_slide_numbers = show_slide_numbers
         self._remove_default_slide()
         self._build_slides(slides)
+        if footer_text or show_slide_numbers:
+            self._apply_footer_and_slide_numbers()
+        if author:
+            self.presentation.core_properties.author = author
 
     def _create_presentation(self, format: str) -> Presentation:
         """Create presentation with appropriate template.
@@ -68,7 +92,7 @@ class PowerpointPresentation(SlideHelperMixin, TextHelperMixin, TableHelperMixin
         Returns:
             Presentation object.
         """
-        template_4_3, template_16_9 = _load_templates()
+        template_4_3, template_16_9 = _get_templates()
         template = template_16_9 if format == "16:9" else template_4_3
 
         if template:
@@ -128,14 +152,14 @@ class PowerpointPresentation(SlideHelperMixin, TextHelperMixin, TableHelperMixin
     # -------------------------------------------------------------------------
 
     def _build_title_slide(self, data: Dict[str, Any]) -> None:
-        """Build a title slide with title and author."""
+        """Build a title slide with title and optional subtitle."""
         layout = self.presentation.slide_layouts[TITLE_LAYOUT]
         slide = self.presentation.slides.add_slide(layout)
 
         if len(slide.placeholders) > 0:
             slide.placeholders[0].text = data.get("slide_title", "")
         if len(slide.placeholders) > 1:
-            slide.placeholders[1].text = data.get("author", "")
+            slide.placeholders[1].text = data.get("subtitle", "")
 
         self._add_speaker_notes(slide, data.get("speaker_notes"))
 
@@ -158,17 +182,12 @@ class PowerpointPresentation(SlideHelperMixin, TextHelperMixin, TableHelperMixin
         if len(slide.placeholders) > 0:
             slide.placeholders[0].text = data.get("slide_title", "")
 
-        # Bullet points
+        # Bullet points — use shared _fill_bullets method
         slide_text = data.get("slide_text", [])
         if slide_text and len(slide.placeholders) > 1:
             placeholder = slide.placeholders[1]
             placeholder.text = ""
-
-            for i, item in enumerate(slide_text):
-                para = placeholder.text_frame.paragraphs[0] if i == 0 else placeholder.text_frame.add_paragraph()
-                para.text = item.get("text", "")
-                para.alignment = PP_ALIGN.LEFT
-                para.level = max(0, int(item.get("indentation_level", 1)) - 1)
+            self._fill_bullets(placeholder.text_frame, slide_text)
 
         self._add_speaker_notes(slide, data.get("speaker_notes"))
 
@@ -177,8 +196,8 @@ class PowerpointPresentation(SlideHelperMixin, TextHelperMixin, TableHelperMixin
         title = data.get("slide_title", "")
         slide, left, top, width, height = self._add_title_content_slide(title)
 
-        # Table
-        table_data = parse_table_data(data.get("table_data", []))
+        # Table — parse_table_data returns (cleaned_rows, column_alignments)
+        table_data, col_alignments = parse_table_data(data.get("table_data", []))
         if not table_data:
             logger.warning("No table data provided")
             return
@@ -196,7 +215,8 @@ class PowerpointPresentation(SlideHelperMixin, TextHelperMixin, TableHelperMixin
             width=width,
             height=height,
             header_color=header_color,
-            alternate_rows=data.get("alternate_rows", True)
+            alternate_rows=data.get("alternate_rows", True),
+            column_alignments=col_alignments,
         )
 
         self._add_speaker_notes(slide, data.get("speaker_notes"))
@@ -278,18 +298,18 @@ class PowerpointPresentation(SlideHelperMixin, TextHelperMixin, TableHelperMixin
                     if left_heading:
                         shape.text = left_heading
                 elif idx == 2:  # Left content
-                    self._fill_placeholder_with_bullets(shape, data.get("left_column", []))
+                    self._fill_bullets(shape.text_frame, data.get("left_column", []))
                 elif idx == 3:  # Right subheader
                     if right_heading:
                         shape.text = right_heading
                 elif idx == 4:  # Right content
-                    self._fill_placeholder_with_bullets(shape, data.get("right_column", []))
+                    self._fill_bullets(shape.text_frame, data.get("right_column", []))
             else:
                 # Two Content layout indices
                 if idx == 1:  # Left content
-                    self._fill_placeholder_with_bullets(shape, data.get("left_column", []))
+                    self._fill_bullets(shape.text_frame, data.get("left_column", []))
                 elif idx == 2:  # Right content
-                    self._fill_placeholder_with_bullets(shape, data.get("right_column", []))
+                    self._fill_bullets(shape.text_frame, data.get("right_column", []))
 
         self._add_speaker_notes(slide, data.get("speaker_notes"))
 
@@ -345,12 +365,17 @@ class PowerpointPresentation(SlideHelperMixin, TextHelperMixin, TableHelperMixin
         tf = quote_box.text_frame
         tf.word_wrap = True
 
-        # Quote text
+        # Quote text — support inline markdown formatting
         para = tf.paragraphs[0]
-        para.text = f'"{quote_text}"'
-        para.font.size = DEFAULT_QUOTE_FONT_SIZE
-        para.font.italic = True
         para.alignment = PP_ALIGN.CENTER
+        formatted_quote = f'"{quote_text}"'
+        if has_inline_formatting(formatted_quote):
+            apply_inline_formatting(para, formatted_quote,
+                                    font_size=DEFAULT_QUOTE_FONT_SIZE, italic=True)
+        else:
+            para.text = formatted_quote
+            para.font.size = DEFAULT_QUOTE_FONT_SIZE
+            para.font.italic = True
 
         # Author
         if quote_author:
@@ -362,6 +387,71 @@ class PowerpointPresentation(SlideHelperMixin, TextHelperMixin, TableHelperMixin
             author_para.space_before = Pt(24)
 
         self._add_speaker_notes(slide, data.get("speaker_notes"))
+
+    # -------------------------------------------------------------------------
+    # Footer & Slide Numbers
+    # -------------------------------------------------------------------------
+
+    def _apply_footer_and_slide_numbers(self) -> None:
+        """Apply footer text and/or slide numbers to all slides.
+
+        Clones the footer/slide-number placeholder shapes from each slide's
+        layout into the slide itself so they become visible. Assigns unique
+        shape IDs to avoid PPTX corruption.
+        """
+        from xml.sax.saxutils import escape as xml_escape
+
+        for slide in self.presentation.slides:
+            layout = slide.slide_layout
+            spTree = slide.shapes._spTree
+
+            # Determine next available shape ID on this slide
+            existing_ids = {
+                int(sp.get('id', 0))
+                for sp in spTree.findall(qn('p:sp') + '//' + qn('p:cNvPr'))
+            }
+            # Simpler: collect all id attributes from direct children
+            existing_ids = set()
+            for sp in spTree:
+                cNvPr = sp.find('.//' + qn('p:cNvPr'))
+                if cNvPr is None:
+                    cNvPr = sp.find('.//' + qn('p:nvSpPr') + '/' + qn('p:cNvPr'))
+                if cNvPr is not None and cNvPr.get('id'):
+                    existing_ids.add(int(cNvPr.get('id')))
+            next_id = max(existing_ids, default=0) + 1
+
+            for ph in layout.placeholders:
+                idx = ph.placeholder_format.idx
+
+                if idx == 11 and self._footer_text:  # FOOTER placeholder
+                    sp = copy.deepcopy(ph._element)
+                    # Assign unique shape ID
+                    cNvPr = sp.find(qn('p:nvSpPr') + '/' + qn('p:cNvPr'))
+                    if cNvPr is not None:
+                        cNvPr.set('id', str(next_id))
+                        next_id += 1
+                    # Set footer text in the cloned element
+                    txBody = sp.find(qn('p:txBody'))
+                    if txBody is not None:
+                        # Clear existing paragraphs and add our text
+                        for p in txBody.findall(qn('a:p')):
+                            txBody.remove(p)
+                        ns = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+                        safe_text = xml_escape(self._footer_text)
+                        p_xml = f'<a:p {ns}><a:r><a:t>{safe_text}</a:t></a:r></a:p>'
+                        txBody.append(parse_xml(p_xml))
+                    spTree.append(sp)
+
+                elif idx == 12 and self._show_slide_numbers:  # SLIDE_NUMBER placeholder
+                    sp = copy.deepcopy(ph._element)
+                    # Assign unique shape ID
+                    cNvPr = sp.find(qn('p:nvSpPr') + '/' + qn('p:cNvPr'))
+                    if cNvPr is not None:
+                        cNvPr.set('id', str(next_id))
+                        next_id += 1
+                    spTree.append(sp)
+
+        logger.debug("Applied footer/slide numbers to all slides")
 
     # -------------------------------------------------------------------------
     # Output

@@ -1,10 +1,12 @@
-"""PowerPoint helper mixins and utility functions.
+"""PowerPoint helper utilities and slide-building mixin.
 
-This module provides mixin classes for common slide operations and utility
+This module provides a single SlideHelpers mixin class that consolidates
+all common slide operations (text, tables, images) and standalone utility
 functions for template loading and data parsing.
 """
 
 import logging
+import re
 from typing import List, Tuple, Optional, Any
 
 from pptx.enum.text import PP_ALIGN
@@ -14,11 +16,12 @@ from pptx.oxml import parse_xml
 
 from .constants import (
     BLANK_LAYOUT, CONTENT_LAYOUT,
-    DEFAULT_TITLE_FONT_SIZE, DEFAULT_BODY_FONT_SIZE,
-    MARGIN_LEFT, MARGIN_TOP, TITLE_HEIGHT,
+    DEFAULT_BODY_FONT_SIZE,
+    MARGIN_LEFT,
     TABLE_HEADER_FILL, TABLE_HEADER_TEXT, TABLE_ALT_ROW_FILL,
 )
 from .image_utils import download_image, ImageDownloadError, ImageValidationError
+from .inline_formatting import has_inline_formatting, apply_inline_formatting
 
 logger = logging.getLogger(__name__)
 
@@ -27,25 +30,63 @@ logger = logging.getLogger(__name__)
 # Utility Functions
 # =============================================================================
 
-def parse_table_data(table_data: List[List[str]]) -> List[List[str]]:
-    """Clean table data by removing markdown separator rows.
+# Regex matching a single markdown table separator cell: optional colon, 3+ dashes, optional colon
+_SEPARATOR_CELL_RE = re.compile(r'^\s*:?-{3,}:?\s*$')
+
+
+def _is_separator_row(row: List[str]) -> bool:
+    """Check if a row is a markdown table separator row (e.g., |:---|:---:|---:|).
+
+    Uses strict per-cell regex to avoid false positives on content containing dashes.
+    """
+    return bool(row) and all(_SEPARATOR_CELL_RE.match(cell) for cell in row)
+
+
+def _extract_alignments(row: List[str]) -> List[Optional[int]]:
+    """Extract column alignments from a markdown separator row.
+
+    Args:
+        row: List of separator cells (e.g., [':---', ':---:', '---:']).
+
+    Returns:
+        List of PP_ALIGN values (LEFT, CENTER, RIGHT) or None per column.
+    """
+    alignments = []
+    for cell in row:
+        cell = cell.strip()
+        if cell.startswith(':') and cell.endswith(':'):
+            alignments.append(PP_ALIGN.CENTER)
+        elif cell.endswith(':'):
+            alignments.append(PP_ALIGN.RIGHT)
+        else:
+            alignments.append(None)  # left/default
+    return alignments
+
+
+def parse_table_data(table_data: List[List[str]]) -> tuple:
+    """Clean table data by removing markdown separator rows and extracting alignments.
 
     Args:
         table_data: Raw table data as list of rows.
 
     Returns:
-        Cleaned table data without separator rows.
+        Tuple of (cleaned_rows, column_alignments).
+        column_alignments is a list of PP_ALIGN values or None per column,
+        or None if no separator row was found.
     """
     if not table_data:
-        return []
+        return [], None
 
-    return [
-        row for row in table_data
-        if not (row and all(
-            '---' in cell or ':-:' in cell or ':--' in cell or '--:' in cell or cell.strip() == ''
-            for cell in row
-        ))
-    ]
+    cleaned = []
+    col_alignments = None
+
+    for row in table_data:
+        if _is_separator_row(row):
+            col_alignments = _extract_alignments(row)
+        else:
+            cleaned.append(row)
+
+    return cleaned, col_alignments
 
 
 def parse_color(color_hex: str, default: RGBColor) -> RGBColor:
@@ -65,11 +106,22 @@ def parse_color(color_hex: str, default: RGBColor) -> RGBColor:
 
 
 # =============================================================================
-# Slide Helper Mixins
+# Consolidated Slide Helpers Mixin
 # =============================================================================
 
-class SlideHelperMixin:
-    """Mixin providing common slide helper methods."""
+class SlideHelpers:
+    """Mixin providing all common slide helper methods (text, tables, images).
+
+    Expects the consuming class to have a `self.presentation` attribute
+    holding a python-pptx Presentation object.
+    """
+
+    # Type hint for IDE — actual attribute is set by the consuming class
+    presentation: Any
+
+    # -------------------------------------------------------------------------
+    # Slide Management
+    # -------------------------------------------------------------------------
 
     def _get_slide_dimensions(self) -> Tuple[int, int]:
         """Get slide width and height."""
@@ -136,51 +188,9 @@ class SlideHelperMixin:
         except Exception as e:
             logger.warning(f"Could not add speaker notes: {e}")
 
-
-class TextHelperMixin:
-    """Mixin providing text-related helper methods."""
-
-    def _add_title_textbox(
-        self,
-        slide,
-        title_text: str,
-        left: int = None,
-        top: int = None,
-        width: int = None,
-        height: int = None,
-        font_size: int = None,
-        bold: bool = True,
-        alignment=PP_ALIGN.LEFT
-    ):
-        """Add a title textbox to a slide.
-
-        Args:
-            slide: PowerPoint slide object.
-            title_text: Title text.
-            left, top, width, height: Position and size (defaults to full width at top).
-            font_size: Font size (defaults to DEFAULT_TITLE_FONT_SIZE).
-            bold: Whether to make text bold.
-            alignment: Text alignment.
-
-        Returns:
-            Created textbox shape.
-        """
-        slide_width, _ = self._get_slide_dimensions()
-
-        left = left if left is not None else MARGIN_LEFT
-        top = top if top is not None else MARGIN_TOP
-        width = width if width is not None else slide_width - (2 * MARGIN_LEFT)
-        height = height if height is not None else TITLE_HEIGHT
-        font_size = font_size or DEFAULT_TITLE_FONT_SIZE
-
-        shape = slide.shapes.add_textbox(left, top, width, height)
-        para = shape.text_frame.paragraphs[0]
-        para.text = title_text
-        para.font.size = font_size
-        para.font.bold = bold
-        para.alignment = alignment
-
-        return shape
+    # -------------------------------------------------------------------------
+    # Text Helpers
+    # -------------------------------------------------------------------------
 
     def _add_text_box(
         self,
@@ -190,7 +200,7 @@ class TextHelperMixin:
         top: int,
         width: int,
         height: int,
-        font_size: int = None,
+        font_size: Optional[int] = None,
         bold: bool = False,
         italic: bool = False,
         alignment=PP_ALIGN.LEFT,
@@ -224,6 +234,49 @@ class TextHelperMixin:
 
         return shape
 
+    def _fill_bullets(
+        self,
+        text_frame,
+        items: List[dict],
+        font_size: Optional[int] = None
+    ) -> None:
+        """Fill a text frame with bullet list content.
+
+        This is the single method for rendering bullet lists, used by both
+        placeholder-based slides and custom textbox-based slides.
+
+        Supports inline markdown formatting in item text:
+        **bold**, *italic*, ***bold italic***, ~~strikethrough~~,
+        __underline__, `code`.
+
+        Args:
+            text_frame: PowerPoint text frame object (from placeholder or textbox).
+            items: List of dicts with 'text' and 'indentation_level' keys.
+            font_size: Optional font size for items.
+        """
+        if not items:
+            return
+
+        text_frame.word_wrap = True
+
+        for i, item in enumerate(items):
+            if i == 0:
+                para = text_frame.paragraphs[0]
+            else:
+                para = text_frame.add_paragraph()
+
+            item_text = item.get("text", "")
+            para.alignment = PP_ALIGN.LEFT
+            para.level = max(0, int(item.get("indentation_level", 1)) - 1)
+
+            # Apply inline markdown formatting if markers are present
+            if has_inline_formatting(item_text):
+                apply_inline_formatting(para, item_text, font_size=font_size)
+            else:
+                para.text = item_text
+                if font_size:
+                    para.font.size = font_size
+
     def _add_bullet_list(
         self,
         slide,
@@ -232,9 +285,9 @@ class TextHelperMixin:
         top: int,
         width: int,
         height: int,
-        font_size: int = None
+        font_size: Optional[int] = None
     ):
-        """Add a bullet list to a slide.
+        """Add a bullet list textbox to a slide.
 
         Args:
             slide: PowerPoint slide object.
@@ -243,58 +296,18 @@ class TextHelperMixin:
             font_size: Font size for items.
 
         Returns:
-            Created textbox shape.
+            Created textbox shape or None if no items.
         """
         if not items:
             return None
 
         shape = slide.shapes.add_textbox(left, top, width, height)
-        tf = shape.text_frame
-        tf.word_wrap = True
-
-        for i, item in enumerate(items):
-            para = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-            para.text = item.get("text", "")
-            para.font.size = font_size or DEFAULT_BODY_FONT_SIZE
-            para.alignment = PP_ALIGN.LEFT
-            para.level = max(0, int(item.get("indentation_level", 1)) - 1)
-
+        self._fill_bullets(shape.text_frame, items, font_size)
         return shape
 
-    def _fill_placeholder_with_bullets(
-        self,
-        placeholder,
-        items: List[dict],
-        font_size: int = None
-    ):
-        """Fill a placeholder shape with bullet list content.
-
-        Args:
-            placeholder: PowerPoint placeholder shape.
-            items: List of dicts with 'text' and 'indentation_level' keys.
-            font_size: Optional font size for items.
-        """
-        if not items:
-            return
-
-        tf = placeholder.text_frame
-        tf.word_wrap = True
-
-        for i, item in enumerate(items):
-            if i == 0:
-                para = tf.paragraphs[0]
-            else:
-                para = tf.add_paragraph()
-
-            para.text = item.get("text", "")
-            if font_size:
-                para.font.size = font_size
-            para.alignment = PP_ALIGN.LEFT
-            para.level = max(0, int(item.get("indentation_level", 1)) - 1)
-
-
-class TableHelperMixin:
-    """Mixin providing table-related helper methods."""
+    # -------------------------------------------------------------------------
+    # Table Helpers
+    # -------------------------------------------------------------------------
 
     def _set_cell_fill(self, cell, color: RGBColor) -> None:
         """Set the background fill color of a table cell.
@@ -330,8 +343,9 @@ class TableHelperMixin:
         top: int,
         width: int,
         height: int,
-        header_color: RGBColor = None,
-        alternate_rows: bool = True
+        header_color: Optional[RGBColor] = None,
+        alternate_rows: bool = True,
+        column_alignments: Optional[List] = None
     ):
         """Create a styled table on a slide.
 
@@ -341,6 +355,8 @@ class TableHelperMixin:
             left, top, width, height: Position and size.
             header_color: Header background color.
             alternate_rows: Whether to use alternating row colors.
+            column_alignments: Optional list of PP_ALIGN values per column
+                (extracted from markdown separator row).
 
         Returns:
             Created table shape.
@@ -364,6 +380,12 @@ class TableHelperMixin:
                 cell = table.cell(row_idx, col_idx)
                 cell.text = str(cell_text) if cell_text else ""
 
+                # Apply column alignment
+                if column_alignments and col_idx < len(column_alignments):
+                    alignment = column_alignments[col_idx]
+                    if alignment is not None:
+                        cell.text_frame.paragraphs[0].alignment = alignment
+
                 if row_idx == 0:  # Header row
                     cell.text_frame.paragraphs[0].font.bold = True
                     cell.text_frame.paragraphs[0].font.color.rgb = TABLE_HEADER_TEXT
@@ -373,9 +395,9 @@ class TableHelperMixin:
 
         return shape
 
-
-class ImageHelperMixin:
-    """Mixin providing image-related helper methods."""
+    # -------------------------------------------------------------------------
+    # Image Helpers
+    # -------------------------------------------------------------------------
 
     def _add_image_from_url(
         self,
