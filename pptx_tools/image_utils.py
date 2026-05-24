@@ -6,7 +6,7 @@ for embedding in PowerPoint slides.
 
 import io
 import logging
-from typing import Optional, Tuple
+from typing import Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -171,57 +171,5 @@ def get_image_extension(content_type: str, url: str) -> str:
     return 'png'
 
 
-def get_image_dimensions(image_data: io.BytesIO) -> Optional[Tuple[int, int]]:
-    """Try to get image dimensions without external dependencies.
 
-    This is a basic implementation that reads PNG and JPEG headers.
-
-    Args:
-        image_data: BytesIO object containing image data.
-
-    Returns:
-        Tuple of (width, height) or None if cannot be determined.
-    """
-    try:
-        image_data.seek(0)
-        header = image_data.read(32)
-        image_data.seek(0)
-
-        # PNG
-        if header[:8] == b'\x89PNG\r\n\x1a\n':
-            width = int.from_bytes(header[16:20], 'big')
-            height = int.from_bytes(header[20:24], 'big')
-            return (width, height)
-
-        # JPEG
-        if header[:2] == b'\xff\xd8':
-            image_data.seek(0)
-            data = image_data.read()
-            image_data.seek(0)
-
-            # Find SOF marker
-            i = 2
-            while i < len(data) - 9:
-                if data[i] == 0xFF:
-                    marker = data[i + 1]
-                    # SOF0, SOF1, SOF2 markers
-                    if marker in (0xC0, 0xC1, 0xC2):
-                        height = int.from_bytes(data[i + 5:i + 7], 'big')
-                        width = int.from_bytes(data[i + 7:i + 9], 'big')
-                        return (width, height)
-                    elif marker == 0xD9:  # EOI
-                        break
-                    elif marker in (0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0x01):
-                        i += 2
-                    else:
-                        length = int.from_bytes(data[i + 2:i + 4], 'big')
-                        i += 2 + length
-                else:
-                    i += 1
-
-        return None
-
-    except Exception as e:
-        logger.debug(f"Could not determine image dimensions: {e}")
-        return None
 

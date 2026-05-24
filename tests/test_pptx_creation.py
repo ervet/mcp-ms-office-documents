@@ -4,7 +4,6 @@ These tests create actual .pptx files and save them to disk for manual inspectio
 Output files are saved to tests/output/pptx/ directory.
 """
 
-import os
 import sys
 from pathlib import Path
 
@@ -45,7 +44,7 @@ class TestBasicSlides:
             {
                 "slide_type": "title",
                 "slide_title": "My Amazing Presentation",
-                "author": "Test Author"
+                "subtitle": "Test Author"
             }
         ]
         pres = PowerpointPresentation(slides, "16:9")
@@ -59,7 +58,7 @@ class TestBasicSlides:
             {
                 "slide_type": "title",
                 "slide_title": "Presentation with Sections",
-                "author": "Tester"
+                "subtitle": "Tester"
             },
             {
                 "slide_type": "section",
@@ -80,7 +79,7 @@ class TestBasicSlides:
             {
                 "slide_type": "title",
                 "slide_title": "Content Slides Demo",
-                "author": "Tester"
+                "subtitle": "Tester"
             },
             {
                 "slide_type": "content",
@@ -162,6 +161,42 @@ class TestTableSlides:
         pres = PowerpointPresentation(slides, "16:9")
         path = save_presentation(pres, "06_table_no_alternating.pptx")
         assert path.exists()
+
+    def test_table_with_alignment(self):
+        """Test table with markdown-style column alignment."""
+        slides = [
+            {
+                "slide_type": "table",
+                "slide_title": "Aligned Table",
+                "table_data": [
+                    ["Name", "Score", "Grade"],
+                    [":---", ":---:", "---:"],  # left, center, right
+                    ["Alice", "95", "A+"],
+                    ["Bob", "82", "B"],
+                ]
+            }
+        ]
+        pres = PowerpointPresentation(slides, "16:9")
+        path = save_presentation(pres, "06b_aligned_table.pptx")
+        assert path.exists()
+
+        from pptx import Presentation as PptxReader
+        from pptx.enum.text import PP_ALIGN
+        prs = PptxReader(str(path))
+        slide = prs.slides[0]
+        for shape in slide.shapes:
+            if shape.has_table:
+                table = shape.table
+                # Separator row should be removed: header + 2 data rows = 3
+                assert len(table.rows) == 3
+                # Column 1 should be centered
+                assert table.cell(0, 1).text_frame.paragraphs[0].alignment == PP_ALIGN.CENTER
+                # Column 2 should be right-aligned
+                assert table.cell(0, 2).text_frame.paragraphs[0].alignment == PP_ALIGN.RIGHT
+                # Column 0 left (None = default)
+                assert table.cell(0, 0).text_frame.paragraphs[0].alignment is None
+                return
+        assert False, "Table not found on slide"
 
 
 class TestTwoColumnSlides:
@@ -392,8 +427,14 @@ class TestChartSlides:
         assert path.exists()
 
 
+@pytest.mark.network
 class TestImageSlides:
-    """Tests for image slides with real images from picsum.photos."""
+    """Tests for image slides with real images from picsum.photos.
+
+    These tests require network access and may be flaky due to external service availability.
+    Run with: pytest -m network
+    Skip with: pytest -m "not network"
+    """
 
     def test_image_slide_with_caption(self):
         """Test image slide with a real image and caption."""
@@ -489,7 +530,7 @@ class TestSpeakerNotes:
             {
                 "slide_type": "title",
                 "slide_title": "Presentation with Speaker Notes",
-                "author": "Presenter"
+                "subtitle": "Presenter"
             },
             {
                 "slide_type": "content",
@@ -533,7 +574,7 @@ class TestFormats:
             {
                 "slide_type": "title",
                 "slide_title": "Widescreen Presentation",
-                "author": "16:9 Format"
+                "subtitle": "16:9 Format"
             },
             {
                 "slide_type": "content",
@@ -553,7 +594,7 @@ class TestFormats:
             {
                 "slide_type": "title",
                 "slide_title": "Standard Presentation",
-                "author": "4:3 Format"
+                "subtitle": "4:3 Format"
             },
             {
                 "slide_type": "content",
@@ -593,7 +634,7 @@ class TestCompletePresentation:
             {
                 "slide_type": "title",
                 "slide_title": "Complete PowerPoint Layout Demo",
-                "author": "MCP Office Documents - All Slide Types",
+                "subtitle": "MCP Office Documents - All Slide Types",
                 "speaker_notes": "This presentation demonstrates all available slide layouts and options."
             },
 
@@ -787,13 +828,13 @@ class TestCompletePresentation:
             },
 
             # =====================================================================
-            # LAYOUT 1: Title and Content - Image
+            # LAYOUT 1: Title and Content - Image (placeholder - no network needed)
             # =====================================================================
             {
                 "slide_type": "image",
                 "slide_title": "Image Slide with Caption",
-                "image_url": "https://picsum.photos/800/600",
-                "image_caption": "Sample image from picsum.photos - automatically scaled to fit",
+                "image_url": "https://example.invalid/sample.png",
+                "image_caption": "Image placeholder (network not available in tests)",
                 "speaker_notes": "Uses Layout 1. Images are downloaded, scaled to fit, and centered."
             },
 
@@ -802,7 +843,7 @@ class TestCompletePresentation:
             # =====================================================================
             {
                 "slide_type": "image",
-                "image_url": "https://picsum.photos/1200/800",
+                "image_url": "https://example.invalid/large.png",
                 "image_caption": "Full-bleed image slide (no title)",
                 "speaker_notes": "Image slides can omit the title for a more impactful visual."
             },
@@ -863,7 +904,7 @@ class TestCompletePresentation:
             {
                 "slide_type": "title",
                 "slide_title": "Thank You!",
-                "author": "Questions & Discussion"
+                "subtitle": "Questions & Discussion"
             }
         ]
 
@@ -939,7 +980,7 @@ class TestEdgeCases:
     def test_many_slides(self):
         """Test creating a presentation with many slides."""
         slides = [
-            {"slide_type": "title", "slide_title": "Many Slides Test", "author": "Tester"}
+            {"slide_type": "title", "slide_title": "Many Slides Test", "subtitle": "Tester"}
         ]
         for i in range(20):
             slides.append({
@@ -955,7 +996,340 @@ class TestEdgeCases:
         print(f"Created presentation with {len(slides)} slides")
 
 
+class TestInlineFormatting:
+    """Tests for inline markdown formatting in slide text."""
+
+    def test_bold_and_italic(self):
+        """Test bold and italic formatting in bullet points."""
+        slides = [
+            {
+                "slide_type": "content",
+                "slide_title": "Inline Formatting",
+                "slide_text": [
+                    {"text": "This is **bold** text", "indentation_level": 1},
+                    {"text": "This is *italic* text", "indentation_level": 1},
+                    {"text": "This is ***bold italic*** text", "indentation_level": 1},
+                ]
+            }
+        ]
+        pres = PowerpointPresentation(slides, "16:9")
+        path = save_presentation(pres, "40_inline_bold_italic.pptx")
+        assert path.exists()
+
+        # Verify runs were created with formatting
+        from pptx import Presentation as PptxReader
+        prs = PptxReader(str(path))
+        slide = prs.slides[0]
+        # Find the content placeholder
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    if len(para.runs) > 1 and "bold" in para.text:
+                        # Should have at least: "This is " + "bold" + " text"
+                        bold_runs = [r for r in para.runs if r.font.bold]
+                        assert len(bold_runs) > 0, "Expected bold run not found"
+                        return
+        # If we get here, we didn't find any formatted paragraphs
+        assert False, "No formatted paragraphs found"
+
+    def test_strikethrough_and_underline(self):
+        """Test strikethrough and underline formatting."""
+        slides = [
+            {
+                "slide_type": "content",
+                "slide_title": "More Formatting",
+                "slide_text": [
+                    {"text": "Has ~~strikethrough~~ text", "indentation_level": 1},
+                    {"text": "Has __underlined__ text", "indentation_level": 1},
+                    {"text": "Has `code` text", "indentation_level": 1},
+                ]
+            }
+        ]
+        pres = PowerpointPresentation(slides, "16:9")
+        path = save_presentation(pres, "41_inline_strike_underline.pptx")
+        assert path.exists()
+
+        from pptx import Presentation as PptxReader
+        prs = PptxReader(str(path))
+        slide = prs.slides[0]
+        found_underline = False
+        found_code = False
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    for r in para.runs:
+                        if r.font.underline:
+                            found_underline = True
+                        if r.font.name == 'Courier New':
+                            found_code = True
+        assert found_underline, "Underline formatting not found"
+        assert found_code, "Code (Courier New) formatting not found"
+
+    def test_formatting_in_two_column(self):
+        """Test inline formatting works in two-column slides."""
+        slides = [
+            {
+                "slide_type": "two_column",
+                "slide_title": "Formatted Columns",
+                "left_heading": "Left",
+                "right_heading": "Right",
+                "left_column": [
+                    {"text": "**Bold** point", "indentation_level": 1},
+                ],
+                "right_column": [
+                    {"text": "*Italic* point", "indentation_level": 1},
+                ],
+            }
+        ]
+        pres = PowerpointPresentation(slides, "16:9")
+        path = save_presentation(pres, "42_inline_two_column.pptx")
+        assert path.exists()
+
+        from pptx import Presentation as PptxReader
+        prs = PptxReader(str(path))
+        slide = prs.slides[0]
+        found_bold = False
+        found_italic = False
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    for r in para.runs:
+                        if r.font.bold and r.text == "Bold":
+                            found_bold = True
+                        if r.font.italic and r.text == "Italic":
+                            found_italic = True
+        assert found_bold, "Bold formatting not found in left column"
+        assert found_italic, "Italic formatting not found in right column"
+
+    def test_plain_text_no_extra_runs(self):
+        """Test that plain text without markers doesn't create multiple runs."""
+        slides = [
+            {
+                "slide_type": "content",
+                "slide_title": "Plain Text",
+                "slide_text": [
+                    {"text": "No formatting here", "indentation_level": 1},
+                ]
+            }
+        ]
+        pres = PowerpointPresentation(slides, "16:9")
+        path = save_presentation(pres, "43_plain_text.pptx")
+        assert path.exists()
+
+        from pptx import Presentation as PptxReader
+        prs = PptxReader(str(path))
+        slide = prs.slides[0]
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    if para.text == "No formatting here":
+                        # Plain text should use para.text directly (no runs via add_run)
+                        assert len(para.runs) <= 1
+                        return
+        assert False, "Expected paragraph 'No formatting here' not found"
+
+    def test_escaped_characters(self):
+        """Test that escaped markdown characters render as literals."""
+        slides = [
+            {
+                "slide_type": "content",
+                "slide_title": "Escapes",
+                "slide_text": [
+                    {"text": "Use \\*asterisks\\* without formatting", "indentation_level": 1},
+                ]
+            }
+        ]
+        pres = PowerpointPresentation(slides, "16:9")
+        path = save_presentation(pres, "44_escaped_chars.pptx")
+        assert path.exists()
+
+        from pptx import Presentation as PptxReader
+        prs = PptxReader(str(path))
+        slide = prs.slides[0]
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    if "asterisks" in para.text:
+                        # Escaped asterisks should render as literal *
+                        assert "*asterisks*" in para.text
+                        # Should NOT have italic formatting
+                        italic_runs = [r for r in para.runs if r.font.italic]
+                        assert len(italic_runs) == 0, "Escaped chars should not produce italic"
+                        return
+        assert False, "Paragraph with escaped characters not found"
+
+
+class TestSubtitle:
+    """Tests for subtitle field on title slides."""
+
+    def test_subtitle_renders(self):
+        """Test that subtitle text appears in the subtitle placeholder."""
+        slides = [
+            {
+                "slide_type": "title",
+                "slide_title": "Main Title",
+                "subtitle": "This is the subtitle"
+            }
+        ]
+        pres = PowerpointPresentation(slides, "16:9")
+        path = save_presentation(pres, "45_subtitle.pptx")
+        assert path.exists()
+
+        from pptx import Presentation as PptxReader
+        prs = PptxReader(str(path))
+        slide = prs.slides[0]
+        found = False
+        for ph in slide.placeholders:
+            if ph.placeholder_format.idx == 1:
+                assert ph.text == "This is the subtitle"
+                found = True
+        assert found, "Subtitle placeholder not found"
+
+    def test_empty_subtitle(self):
+        """Test that omitting subtitle doesn't cause errors."""
+        slides = [
+            {
+                "slide_type": "title",
+                "slide_title": "Title Only",
+            }
+        ]
+        pres = PowerpointPresentation(slides, "16:9")
+        path = save_presentation(pres, "46_no_subtitle.pptx")
+        assert path.exists()
+
+
+class TestFooterAndSlideNumbers:
+    """Tests for footer text and slide number features."""
+
+    def test_footer_text(self):
+        """Test that footer text appears on slides."""
+        slides = [
+            {"slide_type": "title", "slide_title": "Footer Test"},
+            {"slide_type": "content", "slide_title": "Slide 2",
+             "slide_text": [{"text": "Content", "indentation_level": 1}]},
+        ]
+        pres = PowerpointPresentation(slides, "16:9", footer_text="Acme Corp")
+        path = save_presentation(pres, "47_footer_text.pptx")
+        assert path.exists()
+
+        from pptx import Presentation as PptxReader
+        prs = PptxReader(str(path))
+        # Check footer on at least one slide
+        found_footer = False
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if hasattr(shape, 'placeholder_format') and shape.placeholder_format:
+                    if shape.placeholder_format.idx == 11:
+                        assert "Acme Corp" in shape.text
+                        found_footer = True
+        assert found_footer, "Footer placeholder not found on any slide"
+
+    def test_slide_numbers(self):
+        """Test that slide number placeholders are added."""
+        slides = [
+            {"slide_type": "title", "slide_title": "Numbers Test"},
+            {"slide_type": "section", "slide_title": "Section"},
+        ]
+        pres = PowerpointPresentation(slides, "16:9", show_slide_numbers=True)
+        path = save_presentation(pres, "48_slide_numbers.pptx")
+        assert path.exists()
+
+        from pptx import Presentation as PptxReader
+        prs = PptxReader(str(path))
+        found_sldnum = False
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if hasattr(shape, 'placeholder_format') and shape.placeholder_format:
+                    if shape.placeholder_format.idx == 12:
+                        found_sldnum = True
+        assert found_sldnum, "Slide number placeholder not found"
+
+    def test_footer_special_characters(self):
+        """Test that footer handles XML special characters safely."""
+        slides = [
+            {"slide_type": "content", "slide_title": "Special Footer",
+             "slide_text": [{"text": "Test", "indentation_level": 1}]},
+        ]
+        # Footer with characters that would break XML if not escaped
+        pres = PowerpointPresentation(
+            slides, "16:9",
+            footer_text='Acme & Co. <Confidential> "2025"'
+        )
+        path = save_presentation(pres, "49_footer_special_chars.pptx")
+        assert path.exists()
+
+        from pptx import Presentation as PptxReader
+        prs = PptxReader(str(path))
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if hasattr(shape, 'placeholder_format') and shape.placeholder_format:
+                    if shape.placeholder_format.idx == 11:
+                        assert '&' in shape.text
+                        assert '<' in shape.text
+                        return
+        assert False, "Footer with special chars not found"
+
+    def test_no_footer_no_numbers(self):
+        """Test that nothing is added when features are disabled."""
+        slides = [
+            {"slide_type": "content", "slide_title": "Clean Slide",
+             "slide_text": [{"text": "Content", "indentation_level": 1}]},
+        ]
+        pres = PowerpointPresentation(slides, "16:9")
+        path = save_presentation(pres, "50_no_footer_numbers.pptx")
+        assert path.exists()
+
+        from pptx import Presentation as PptxReader
+        prs = PptxReader(str(path))
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if hasattr(shape, 'placeholder_format') and shape.placeholder_format:
+                    idx = shape.placeholder_format.idx
+                    assert idx not in (11, 12), f"Found unexpected placeholder idx={idx}"
+
+
+class TestAuthorMetadata:
+    """Tests for author document metadata."""
+
+    def test_author_in_properties(self):
+        """Test that author is stored in document core properties."""
+        slides = [
+            {"slide_type": "title", "slide_title": "Metadata Test", "subtitle": "A Subtitle"},
+        ]
+        pres = PowerpointPresentation(slides, "16:9", author="Custom Author")
+        path = save_presentation(pres, "51_author_metadata.pptx")
+        assert path.exists()
+
+        from pptx import Presentation as PptxReader
+        prs = PptxReader(str(path))
+        assert prs.core_properties.author == "Custom Author"
+
+    def test_no_author(self):
+        """Test that omitting author preserves template default (not overwritten)."""
+        slides = [
+            {"slide_type": "title", "slide_title": "No Author"},
+        ]
+        pres = PowerpointPresentation(slides, "16:9")
+        path = save_presentation(pres, "52_no_author.pptx")
+        assert path.exists()
+
+        from pptx import Presentation as PptxReader
+        prs = PptxReader(str(path))
+        # When author param is not provided, it should NOT be "Custom Author"
+        # (it may be empty or carry the template's default metadata)
+        assert prs.core_properties.author != "Custom Author"
+
+
 if __name__ == "__main__":
     # Run tests with verbose output
     pytest.main([__file__, "-v", "-s"])
+
+
+
+
+
+
+
+
+
 

@@ -9,7 +9,6 @@ from typing import Dict, Any, Optional
 
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
-from pptx.dml.color import RGBColor
 
 logger = logging.getLogger(__name__)
 
@@ -164,14 +163,3 @@ def add_chart_to_slide(
     logger.debug(f"Chart added successfully with {len(chart_data['series'])} series")
 
 
-# Default chart colors (modern palette)
-DEFAULT_CHART_COLORS = [
-    RGBColor(0x41, 0x72, 0xC4),  # Blue
-    RGBColor(0xED, 0x7D, 0x31),  # Orange
-    RGBColor(0xA5, 0xA5, 0xA5),  # Gray
-    RGBColor(0xFF, 0xC0, 0x00),  # Yellow
-    RGBColor(0x5B, 0x9B, 0xD5),  # Light Blue
-    RGBColor(0x70, 0xAD, 0x47),  # Green
-    RGBColor(0x9E, 0x48, 0x0E),  # Brown
-    RGBColor(0x63, 0x6F, 0x7F),  # Dark Gray
-]

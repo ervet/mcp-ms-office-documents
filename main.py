@@ -1,8 +1,8 @@
-from typing import Annotated, List, Dict, Optional, Literal
+from typing import Annotated, List, Optional, Literal
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
-from pydantic import BaseModel, Field
+from pydantic import Field
 from xlsx_tools import markdown_to_excel
 from docx_tools import markdown_to_word
 from docx_tools.dynamic_docx_tools import register_docx_template_tools_from_yaml
@@ -146,21 +146,6 @@ else:
         "[dynamic-docx] No dynamic DOCX templates file found at /app/config/docx_templates.yaml or config/docx_templates.yaml - skipping"
     )
 
-class PowerPointSlide(BaseModel):
-    """PowerPoint slide - can be title, section, content, or table slide based on slide_type."""
-    slide_type: Literal["title", "section", "content", "table"] = Field(description="Type of slide: 'title' for presentation opening, 'section' for dividers, 'content' for slide with bullet points, 'table' for slide with a table")
-    slide_title: str = Field(description="Title text for the slide")
-
-    # Optional fields based on slide type
-    author: Optional[str] = Field(default="", description="Author name for title slides - appears in subtitle placeholder. Leave empty for section/content/table slides.")
-    slide_text: Optional[List[Dict]] = Field(
-        default=None,
-        description="Array of bullet points for content slides. Each bullet point must have 'text' (string) and 'indentation_level' (integer 1-5). Leave empty/null for title, section, and table slides."
-    )
-    table_data: Optional[List[List[str]]] = Field(
-        default=None,
-        description="Table data for table slides. A list of rows where each row is a list of cell values (strings). The first row is treated as the header row. Leave empty/null for title, section, and content slides."
-    )
 
 @mcp.tool(
     name="create_excel_from_markdown",
@@ -274,21 +259,26 @@ async def create_powerpoint_presentation(
     slides: Annotated[List[dict], Field(
         description="""List of slide objects. Each slide requires 'slide_type' (str) and type-specific fields:
 
-- title: {slide_type: "title", slide_title: str, author?: str}
+- title: {slide_type: "title", slide_title: str, subtitle?: str}  (subtitle can contain author name, tagline, date, etc.)
 - section: {slide_type: "section", slide_title: str}
 - content: {slide_type: "content", slide_title: str, slide_text: [{text: str, indentation_level: int (1-3)}]}
-- table: {slide_type: "table", slide_title: str, table_data: [[str]] (first row = header), header_color?: str (hex), alternate_rows?: bool}
+- table: {slide_type: "table", slide_title: str, table_data: [[str]] (first row = header; optional second row with :---|:---:|---: for left/center/right column alignment), header_color?: str (hex), alternate_rows?: bool}
 - image: {slide_type: "image", slide_title?: str, image_url: str, image_caption?: str}
 - two_column: {slide_type: "two_column", slide_title: str, left_column: [{text: str, indentation_level: int}], right_column: [{text: str, indentation_level: int}], left_heading?: str, right_heading?: str}
 - chart: {slide_type: "chart", slide_title: str, chart_type: str (bar|column|line|pie|doughnut|stacked_bar|area), chart_data: {categories: [str], series: [{name: str, values: [number]}]}, has_legend?: bool, legend_position?: str}
 - quote: {slide_type: "quote", slide_title?: str, quote_text: str, quote_author?: str}
 
-All slides support optional 'speaker_notes': str field."""
+All slides support optional 'speaker_notes': str field.
+
+Inline markdown formatting is supported in text fields (slide_text, quote_text, left_column, right_column): **bold**, *italic*, ***bold italic***, ~~strikethrough~~, __underline__, `code`."""
     )],
     format: Annotated[Literal["4:3", "16:9"], Field(
         default="16:9",
         description="Aspect ratio: '16:9' (widescreen) or '4:3' (traditional)"
     )] = "16:9",
+    author: Annotated[Optional[str], Field(description="Author name stored in document properties/metadata.", default=None)] = None,
+    footer_text: Annotated[Optional[str], Field(description="Footer text displayed on every slide (e.g., company name, confidentiality notice).", default=None)] = None,
+    show_slide_numbers: Annotated[bool, Field(description="Show slide numbers on every slide.", default=False)] = False,
     file_name: Annotated[Optional[str], Field(description="Custom filename for the output file (without extension). If not provided, a unique identifier will be used.", default=None)] = None,
 ) -> str:
     """Creates PowerPoint presentations with structured slide models and professional templates."""
@@ -296,7 +286,13 @@ All slides support optional 'speaker_notes': str field."""
     logger.info(f"Creating PowerPoint presentation with {len(slides)} slides in {format} format")
 
     try:
-        result = await run_blocking(create_presentation, slides, format, file_name=file_name)
+        result = await run_blocking(
+            create_presentation, slides, format,
+            file_name=file_name,
+            author=author,
+            footer_text=footer_text,
+            show_slide_numbers=show_slide_numbers,
+        )
         logger.info(f"PowerPoint presentation created: {result}")
         return result
     except Exception as e:
