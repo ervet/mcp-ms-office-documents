@@ -154,8 +154,9 @@ else:
     annotations={"title": "Markdown to Excel Converter"}
 )
 async def create_excel_document(
-    markdown_content: Annotated[str, Field(description="Markdown content containing tables, headers, and formulas. Use '## Sheet: Sheet Name' to create multiple worksheets. Use T1.B[0] for cross-table references and B[0] for current row references. Use SheetName!T1.B[0] for cross-sheet references (resolves to SheetName!B2 in Excel). ALWAYS use [0], [1], [2] notation, NEVER use absolute row numbers like B2, B3. Do NOT count table header as first row, first row has index [0]. Supports cell formatting: **bold**, *italic*.")],
+    markdown_content: Annotated[str, Field(description="Markdown content containing tables, headers, and formulas. Use '## Sheet: Sheet Name' to create multiple worksheets. Use T1.B[0] for cross-table references and B[0] for current row references. Use SheetName!T1.B[0] for cross-sheet references (resolves to SheetName!B2 in Excel). ALWAYS use [0], [1], [2] notation, NEVER use absolute row numbers like B2, B3. Do NOT count table header as first row, first row has index [0]. Supports cell formatting: **bold**, *italic*. Supports column alignment via separator row: |:---|  left, |:---:| center, |---:| right. Dates are auto-detected and formatted (ISO, European, US formats).")],
     file_name: Annotated[Optional[str], Field(description="Custom filename for the output file (without extension). If not provided, a unique identifier will be used.", default=None)] = None,
+    auto_filter: Annotated[bool, Field(description="If true, adds Excel auto-filter dropdowns to table headers, enabling sorting and filtering in Excel.", default=False)] = False,
 ) -> str:
     """
     Converts markdown to Excel with advanced formula support.
@@ -164,7 +165,7 @@ async def create_excel_document(
     logger.info("Converting markdown to Excel document")
 
     try:
-        result = await run_blocking(markdown_to_excel, markdown_content, file_name=file_name)
+        result = await run_blocking(markdown_to_excel, markdown_content, file_name=file_name, auto_filter=auto_filter)
         logger.info("Excel document uploaded successfully")
         return result
     except Exception as e:

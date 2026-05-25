@@ -8,12 +8,10 @@ in sync.
 from __future__ import annotations
 
 import re
-import logging
 from dataclasses import dataclass, field
 
 from .helpers import parse_table
 
-logger = logging.getLogger(__name__)
 
 # Pattern for multi-sheet heading: ## Sheet: Name
 SHEET_HEADING_PATTERN = re.compile(r'^##\s+Sheet:\s+(.+)$')

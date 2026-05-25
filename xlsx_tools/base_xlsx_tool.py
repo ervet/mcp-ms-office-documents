@@ -28,12 +28,17 @@ HEADER_FONTS = {
 HEADER_FONT_DEFAULT = Font(size=12, bold=True)
 
 
-def markdown_to_excel(markdown_content: str, file_name: str | None = None) -> str:
+def markdown_to_excel(markdown_content: str, file_name: str | None = None, auto_filter: bool = False) -> str:
     """Convert Markdown to Excel workbook (focused on tables and headers).
 
     Always starts from an empty Workbook (no templates).
     Supports multiple sheets via '## Sheet: Name' headings.
     Supports cross-sheet references via ``SheetName!T1.B[0]`` syntax.
+
+    Args:
+        markdown_content: Markdown string with tables.
+        file_name: Optional custom filename (without extension).
+        auto_filter: If True, apply Excel auto-filter to each table.
 
     Raises:
         RuntimeError: If the markdown contains no tables or conversion fails.
@@ -101,6 +106,7 @@ def markdown_to_excel(markdown_content: str, file_name: str | None = None) -> st
                 add_table_to_sheet(
                     event.table_data, ws, event.start_row, table_positions,
                     all_sheet_table_positions=all_sheet_table_positions,
+                    auto_filter=auto_filter,
                 )
 
                 tables_count += 1

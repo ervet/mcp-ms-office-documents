@@ -1,45 +1,172 @@
 import re
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 
+from dateutil import parser as dateutil_parser
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 logger = logging.getLogger(__name__)
 
-# ── Layout Constants (shared with base_xlsx_tool) ─────────────────────────────
+# ── Layout Constants ──────────────────────────────────────────────────────────
 TABLE_BOTTOM_SPACING = 2
 MIN_COLUMN_WIDTH = 12
 MAX_COLUMN_WIDTH = 25
 COLUMN_WIDTH_PADDING = 2
 
+# Date formats to try before falling back to dateutil auto-detection.
+# Order matters — more specific/common formats first.
+# Each entry: (strptime_format, excel_number_format)
+DATE_FORMATS: list[tuple[str, str]] = [
+    # ISO
+    ("%Y-%m-%d", "YYYY-MM-DD"),
+    ("%Y-%m-%dT%H:%M:%S", "YYYY-MM-DD HH:MM:SS"),
+    ("%Y-%m-%dT%H:%M", "YYYY-MM-DD HH:MM"),
+    # European (day first)
+    ("%d.%m.%Y", "DD.MM.YYYY"),
+    ("%d/%m/%Y", "DD/MM/YYYY"),
+    ("%d-%m-%Y", "DD-MM-YYYY"),
+    ("%d. %m. %Y", "DD. MM. YYYY"),
+    # US (month first)
+    ("%m/%d/%Y", "MM/DD/YYYY"),
+    # With time
+    ("%d.%m.%Y %H:%M", "DD.MM.YYYY HH:MM"),
+    ("%d.%m.%Y %H:%M:%S", "DD.MM.YYYY HH:MM:SS"),
+    ("%m/%d/%Y %H:%M", "MM/DD/YYYY HH:MM"),
+    # Short year
+    ("%d.%m.%y", "DD.MM.YY"),
+    ("%d/%m/%y", "DD/MM/YY"),
+    ("%m/%d/%y", "MM/DD/YY"),
+    # Named months
+    ("%d %b %Y", "DD MMM YYYY"),
+    ("%d %B %Y", "DD MMMM YYYY"),
+    ("%b %d, %Y", "MMM DD, YYYY"),
+    ("%B %d, %Y", "MMMM DD, YYYY"),
+]
+
+# Minimum length to even attempt date parsing (avoids matching plain numbers)
+_MIN_DATE_LENGTH = 6
+# Regex to quickly reject values that clearly can't be dates
+_DATE_CANDIDATE_RE = re.compile(r'^\d{1,4}[\.\-/]|^\d{1,2}\s+\w|^\w+\s+\d')
+
+
+def _try_parse_date(value: str) -> tuple[datetime, str] | None:
+    """Attempt to parse a string as a date/datetime.
+
+    Tries explicit formats first (fast, unambiguous), then falls back to
+    dateutil for natural language dates.
+
+    Returns (datetime_obj, excel_number_format) or None.
+    """
+    if len(value) < _MIN_DATE_LENGTH:
+        return None
+    if not _DATE_CANDIDATE_RE.match(value):
+        return None
+
+    # Try explicit formats first (deterministic, no ambiguity)
+    for fmt, xl_fmt in DATE_FORMATS:
+        try:
+            dt = datetime.strptime(value, fmt)
+            return dt, xl_fmt
+        except ValueError:
+            continue
+
+    # Fallback to dateutil (handles many international/natural formats)
+    try:
+        dt = dateutil_parser.parse(value, dayfirst=True, fuzzy=False)
+        # Only accept if the string is sufficiently "date-like" —
+        # dateutil can parse things like "1" or "March" alone which we don't want
+        if dt and len(value) >= 8:
+            # Determine appropriate format based on whether time is present
+            if dt.hour or dt.minute or dt.second:
+                return dt, "YYYY-MM-DD HH:MM:SS"
+            return dt, "YYYY-MM-DD"
+    except (ValueError, TypeError, OverflowError):
+        pass
+
+    return None
+
+
+def _is_separator_row(line: str) -> bool:
+    """Check if a table line is a markdown separator row (e.g. |---|:---:|---:|).
+
+    Only returns True if ALL cells in the row match the separator pattern,
+    preventing false positives from data cells that happen to contain '---'.
+    """
+    cells = [c.strip() for c in line.split('|')[1:-1]]
+    if not cells:
+        return False
+    return all(re.match(r'^:?-{3,}:?$', c) for c in cells)
+
+
+def _parse_column_alignments(separator_line: str) -> list[str | None]:
+    """Extract column alignments from a markdown separator row.
+
+    Returns a list of alignment strings ('left', 'center', 'right') or None per column.
+    This is the same logic used by docx_tools but returns generic strings
+    instead of Word-specific enums.
+    """
+    cells = [c.strip() for c in separator_line.split('|')[1:-1]]
+    alignments: list[str | None] = []
+    for cell in cells:
+        cell = cell.strip()
+        if cell.startswith(':') and cell.endswith(':'):
+            alignments.append('center')
+        elif cell.endswith(':'):
+            alignments.append('right')
+        elif cell.startswith(':'):
+            alignments.append('left')
+        else:
+            alignments.append(None)  # auto — will use heuristic
+    return alignments
+
 
 def parse_table(lines: list[str], start_idx: int) -> tuple[list[list[str]] | None, int]:
-    """Parse markdown table and return (table_data, next_index)."""
+    """Parse markdown table and return (table_data, next_index).
+
+    Also extracts column alignments from the separator row and stores them
+    as a '_col_alignments' attribute on the returned list (duck-typed).
+    """
     table_lines: list[str] = []
     i = start_idx
 
-    # Find all consecutive table lines
+    # Find all consecutive table lines (allow missing trailing pipe)
     while i < len(lines):
         line = lines[i].strip()
-        if line.startswith('|') and line.endswith('|'):
+        if line.startswith('|'):
+            # Normalize: ensure trailing pipe for consistent splitting
+            if not line.endswith('|'):
+                line = line + '|'
             table_lines.append(line)
             i += 1
         else:
             break
 
     if len(table_lines) < 2:  # Need at least header and separator
-        return None, start_idx + 1
+        return None, i if i > start_idx else start_idx + 1
 
-    # Parse table data skipping separator row
+    # Parse table data, extracting alignment from separator row
     table_data: list[list[str]] = []
+    col_alignments: list[str | None] = []
     for line in table_lines:
-        if '---' in line or ':-:' in line or ':--' in line or '--:' in line:
+        if _is_separator_row(line):
+            col_alignments = _parse_column_alignments(line)
             continue
         cells = [cell.strip() for cell in line.split('|')[1:-1]]
         table_data.append(cells)
 
-    return table_data, i
+    # Attach alignment info to the table_data list
+    table_data_with_align = TableData(table_data, col_alignments)
+    return table_data_with_align, i
+
+
+class TableData(list):
+    """A list subclass that carries column alignment metadata."""
+
+    def __init__(self, data: list[list[str]], col_alignments: list[str | None] | None = None):
+        super().__init__(data)
+        self.col_alignments: list[str | None] = col_alignments or []
 
 
 # ── Cell Resolution ───────────────────────────────────────────────────────────
@@ -47,9 +174,11 @@ def parse_table(lines: list[str], start_idx: int) -> tuple[list[list[str]] | Non
 @dataclass
 class CellResult:
     """Resolved cell metadata — all information needed to write a cell to Excel."""
-    value: str | int | float  # The cleaned value to write
+    value: str | int | float | datetime  # The cleaned value to write
     is_formula: bool = False
     is_percent: bool = False
+    is_date: bool = False
+    date_format: str = ""  # Excel number format for dates (e.g. "YYYY-MM-DD")
     bold: bool = False
     italic: bool = False
     monospace: bool = False
@@ -122,7 +251,7 @@ def resolve_cell(raw_text: str) -> CellResult:
                 bold=bold, italic=italic, monospace=monospace,
             )
         except ValueError:
-            pass  # Not a valid percent number — fall through to text
+            pass  # Not a valid percent number — fall through
 
     # Step 5: Try numeric conversion
     try:
@@ -134,7 +263,16 @@ def resolve_cell(raw_text: str) -> CellResult:
     except ValueError:
         pass
 
-    # Step 6: Plain text
+    # Step 6: Try date detection (after numeric, so "2024" isn't parsed as a date)
+    date_result = _try_parse_date(clean_text)
+    if date_result:
+        dt, xl_fmt = date_result
+        return CellResult(
+            value=dt, is_date=True, date_format=xl_fmt,
+            bold=bold, italic=italic, monospace=monospace,
+        )
+
+    # Step 7: Plain text
     return CellResult(
         value=clean_text,
         bold=bold, italic=italic, monospace=monospace,
@@ -374,10 +512,16 @@ def add_table_to_sheet(
     start_row: int,
     table_positions: dict[str, int] | None = None,
     all_sheet_table_positions: dict[str, dict[str, int]] | None = None,
+    auto_filter: bool = False,
 ) -> int:
     """Add table data to Excel worksheet with proper formatting and formula support."""
     if not table_data:
         return start_row
+
+    # Extract column alignments if available (from TableData subclass)
+    col_alignments: list[str | None] = []
+    if hasattr(table_data, 'col_alignments'):
+        col_alignments = table_data.col_alignments
 
     # Styles
     header_font = Font(bold=True, color="FFFFFF")
@@ -402,14 +546,20 @@ def add_table_to_sheet(
                 else:
                     cell.value = resolved.value
 
-                # Apply inline formatting (bold/italic/monospace)
-                apply_cell_formatting(cell, resolved.formatting_info)
+                # Apply inline formatting (bold/italic/monospace) — skip for header row
+                # since header styling will override it immediately below
+                if row_idx > 0:
+                    apply_cell_formatting(cell, resolved.formatting_info)
                 cell.border = border
 
-                # Alignment
+                # Alignment — use explicit column alignment from separator if available,
+                # otherwise fall back to heuristic
+                explicit_align = col_alignments[col_idx] if col_idx < len(col_alignments) else None
                 if row_idx == 0:
                     cell.alignment = Alignment(horizontal='center')
-                elif isinstance(cell.value, (int, float)) or (isinstance(cell.value, str) and cell.value.startswith('=')):
+                elif explicit_align:
+                    cell.alignment = Alignment(horizontal=explicit_align)
+                elif isinstance(cell.value, (int, float, datetime)) or (isinstance(cell.value, str) and cell.value.startswith('=')):
                     cell.alignment = Alignment(horizontal='right')
                 else:
                     cell.alignment = Alignment(horizontal='left')
@@ -424,17 +574,37 @@ def add_table_to_sheet(
                 # Apply percentage number format
                 if resolved.is_percent and isinstance(cell.value, (int, float)):
                     cell.number_format = '0%'
+
+                # Apply date number format
+                if resolved.is_date and resolved.date_format:
+                    cell.number_format = resolved.date_format
             except Exception as e:
                 logger.warning("Error processing cell [row=%d, col=%d]: %s", current_excel_row, col_idx + 1, e)
 
-    # Column widths
+    # Column widths — based on clean text length (not raw markdown with formatting markers)
+    FORMULA_WIDTH_CAP = 12  # Formulas display as numbers, cap their width contribution
     for col_idx in range(len(table_data[0]) if table_data else 0):
         column_letter = get_column_letter(col_idx + 1)
         max_length = 0
         for row in table_data:
             if col_idx < len(row):
-                max_length = max(max_length, len(str(row[col_idx])))
+                resolved = resolve_cell(row[col_idx])
+                if resolved.is_formula:
+                    length = FORMULA_WIDTH_CAP
+                elif resolved.is_date:
+                    length = len(resolved.date_format)
+                else:
+                    length = len(str(resolved.value))
+                max_length = max(max_length, length)
         adjusted_width = min(max(max_length + COLUMN_WIDTH_PADDING, MIN_COLUMN_WIDTH), MAX_COLUMN_WIDTH)
         worksheet.column_dimensions[column_letter].width = adjusted_width
+
+    # Auto-filter: apply to the table range if requested
+    if auto_filter:
+        num_cols = len(table_data[0]) if table_data else 0
+        if num_cols > 0:
+            last_col_letter = get_column_letter(num_cols)
+            last_data_row = start_row + len(table_data) - 1
+            worksheet.auto_filter.ref = f"A{start_row}:{last_col_letter}{last_data_row}"
 
     return start_row + len(table_data) + TABLE_BOTTOM_SPACING

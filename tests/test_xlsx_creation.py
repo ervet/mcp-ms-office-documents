@@ -419,6 +419,272 @@ class TestNumberFormats:
         assert cell.number_format == '#,##0'
 
 
+class TestAutoFilter:
+    """Tests for the auto_filter feature."""
+
+    def test_auto_filter_enabled(self):
+        """When auto_filter=True, auto-filter is applied to the table range."""
+        markdown = """| Name | Value |
+|------|-------|
+| A    | 1     |
+| B    | 2     |
+"""
+        captured = {}
+
+        def fake_upload(file_obj, suffix, **kwargs):
+            captured['data'] = file_obj.read()
+            file_obj.seek(0)
+            return "https://fake-url/test.xlsx"
+
+        with patch("xlsx_tools.base_xlsx_tool.upload_file", side_effect=fake_upload):
+            markdown_to_excel(markdown, auto_filter=True)
+
+        wb = load_workbook(io.BytesIO(captured['data']))
+        ws = wb.active
+        assert ws.auto_filter.ref == "A1:B3"
+
+    def test_auto_filter_disabled_by_default(self):
+        """By default, no auto-filter is applied."""
+        markdown = """| Name | Value |
+|------|-------|
+| A    | 1     |
+"""
+        wb = _create_workbook_from_markdown(markdown)
+        ws = wb.active
+        assert ws.auto_filter.ref is None or ws.auto_filter.ref == ""
+
+    def test_auto_filter_multi_sheet(self):
+        """Auto-filter works on multi-sheet workbooks (applied per table)."""
+        markdown = """## Sheet: Data
+
+| Col1 | Col2 | Col3 |
+|------|------|------|
+| A    | B    | C    |
+| D    | E    | F    |
+"""
+        captured = {}
+
+        def fake_upload(file_obj, suffix, **kwargs):
+            captured['data'] = file_obj.read()
+            file_obj.seek(0)
+            return "https://fake-url/test.xlsx"
+
+        with patch("xlsx_tools.base_xlsx_tool.upload_file", side_effect=fake_upload):
+            markdown_to_excel(markdown, auto_filter=True)
+
+        wb = load_workbook(io.BytesIO(captured['data']))
+        ws = wb["Data"]
+        assert ws.auto_filter.ref == "A1:C3"
+
+
+class TestColumnAlignment:
+    """Tests for column alignment from separator row markers."""
+
+    def test_explicit_alignment_left_center_right(self):
+        """Separator markers :--- / :---: / ---: set column alignment."""
+        markdown = """| Name | Status | Amount |
+|:-----|:------:|-------:|
+| Alice | Active | 1000   |
+"""
+        wb = _create_workbook_from_markdown(markdown)
+        ws = wb.active
+        # Data row (row 2): check alignment
+        assert ws.cell(row=2, column=1).alignment.horizontal == 'left'
+        assert ws.cell(row=2, column=2).alignment.horizontal == 'center'
+        assert ws.cell(row=2, column=3).alignment.horizontal == 'right'
+
+    def test_no_alignment_markers_uses_heuristic(self):
+        """Without alignment markers, numbers align right and text aligns left."""
+        markdown = """| Name | Value |
+|------|-------|
+| Alice | 100  |
+"""
+        wb = _create_workbook_from_markdown(markdown)
+        ws = wb.active
+        assert ws.cell(row=2, column=1).alignment.horizontal == 'left'
+        assert ws.cell(row=2, column=2).alignment.horizontal == 'right'
+
+    def test_header_row_always_centered(self):
+        """Header row is always centered regardless of alignment markers."""
+        markdown = """| Name | Value |
+|:-----|------:|
+| A    | 1     |
+"""
+        wb = _create_workbook_from_markdown(markdown)
+        ws = wb.active
+        assert ws.cell(row=1, column=1).alignment.horizontal == 'center'
+        assert ws.cell(row=1, column=2).alignment.horizontal == 'center'
+
+
+class TestDateDetection:
+    """Tests for automatic date detection and formatting."""
+
+    def test_iso_date(self):
+        """ISO dates (YYYY-MM-DD) are detected and stored as datetime."""
+        markdown = """| Event | Date |
+|-------|------|
+| Launch | 2024-01-15 |
+"""
+        wb = _create_workbook_from_markdown(markdown)
+        ws = wb.active
+        cell = ws.cell(row=2, column=2)
+        from datetime import datetime
+        assert isinstance(cell.value, datetime)
+        assert cell.value.year == 2024
+        assert cell.value.month == 1
+        assert cell.value.day == 15
+        assert cell.number_format == "YYYY-MM-DD"
+
+    def test_european_date_dot_format(self):
+        """European dates (DD.MM.YYYY) are detected."""
+        markdown = """| Date |
+|------|
+| 15.03.2024 |
+"""
+        wb = _create_workbook_from_markdown(markdown)
+        ws = wb.active
+        cell = ws.cell(row=2, column=1)
+        from datetime import datetime
+        assert isinstance(cell.value, datetime)
+        assert cell.value.day == 15
+        assert cell.value.month == 3
+        assert cell.number_format == "DD.MM.YYYY"
+
+    def test_named_month_date(self):
+        """Named month dates (Jan 15, 2024) are detected."""
+        markdown = """| Date |
+|------|
+| Jan 15, 2024 |
+"""
+        wb = _create_workbook_from_markdown(markdown)
+        ws = wb.active
+        cell = ws.cell(row=2, column=1)
+        from datetime import datetime
+        assert isinstance(cell.value, datetime)
+        assert cell.value.month == 1
+        assert cell.value.day == 15
+
+    def test_iso_datetime_with_time(self):
+        """ISO datetime with time component is detected."""
+        markdown = """| Timestamp |
+|-----------|
+| 2024-01-15T14:30 |
+"""
+        wb = _create_workbook_from_markdown(markdown)
+        ws = wb.active
+        cell = ws.cell(row=2, column=1)
+        from datetime import datetime
+        assert isinstance(cell.value, datetime)
+        assert cell.value.hour == 14
+        assert cell.value.minute == 30
+        assert cell.number_format == "YYYY-MM-DD HH:MM"
+
+    def test_plain_numbers_not_detected_as_dates(self):
+        """Plain numbers should NOT be detected as dates."""
+        markdown = """| Value |
+|-------|
+| 1234  |
+| 2024  |
+"""
+        wb = _create_workbook_from_markdown(markdown)
+        ws = wb.active
+        assert ws.cell(row=2, column=1).value == 1234.0
+        assert ws.cell(row=3, column=1).value == 2024.0
+
+    def test_short_strings_not_detected_as_dates(self):
+        """Short strings like 'Q1', 'N/A' should NOT be detected as dates."""
+        markdown = """| Label |
+|-------|
+| Q1    |
+| N/A   |
+| Hello |
+"""
+        wb = _create_workbook_from_markdown(markdown)
+        ws = wb.active
+        assert ws.cell(row=2, column=1).value == "Q1"
+        assert ws.cell(row=3, column=1).value == "N/A"
+        assert ws.cell(row=4, column=1).value == "Hello"
+
+
+class TestDateDetectionUnit:
+    """Unit tests for _try_parse_date."""
+
+    def test_iso_format(self):
+        from xlsx_tools.helpers import _try_parse_date
+        result = _try_parse_date("2024-06-15")
+        assert result is not None
+        dt, fmt = result
+        assert dt.year == 2024 and dt.month == 6 and dt.day == 15
+        assert fmt == "YYYY-MM-DD"
+
+    def test_european_dot(self):
+        from xlsx_tools.helpers import _try_parse_date
+        result = _try_parse_date("31.12.2023")
+        assert result is not None
+        dt, fmt = result
+        assert dt.day == 31 and dt.month == 12 and dt.year == 2023
+        assert fmt == "DD.MM.YYYY"
+
+    def test_short_year(self):
+        from xlsx_tools.helpers import _try_parse_date
+        result = _try_parse_date("15.03.24")
+        assert result is not None
+        dt, fmt = result
+        assert dt.day == 15 and dt.month == 3
+        assert fmt == "DD.MM.YY"
+
+    def test_named_month_long(self):
+        from xlsx_tools.helpers import _try_parse_date
+        result = _try_parse_date("15 March 2024")
+        assert result is not None
+        dt, fmt = result
+        assert dt.day == 15 and dt.month == 3
+        assert fmt == "DD MMMM YYYY"
+
+    def test_rejects_plain_number(self):
+        from xlsx_tools.helpers import _try_parse_date
+        assert _try_parse_date("12345") is None
+        assert _try_parse_date("2024") is None
+
+    def test_rejects_short_string(self):
+        from xlsx_tools.helpers import _try_parse_date
+        assert _try_parse_date("Q1") is None
+        assert _try_parse_date("Hello") is None
+        assert _try_parse_date("AB") is None
+
+    def test_rejects_empty(self):
+        from xlsx_tools.helpers import _try_parse_date
+        assert _try_parse_date("") is None
+        assert _try_parse_date("abc") is None
+
+
+class TestTableParsingImprovements:
+    """Tests for parse_table improvements (trailing pipe, separator detection)."""
+
+    def test_table_without_trailing_pipe(self):
+        """Tables without trailing pipes are parsed correctly."""
+        markdown = """| Name | Value
+|------|------
+| A    | 1
+"""
+        wb = _create_workbook_from_markdown(markdown)
+        ws = wb.active
+        assert ws.cell(row=2, column=1).value == "A"
+
+    def test_data_with_dashes_not_skipped(self):
+        """Data rows containing '---' are NOT skipped as separator rows."""
+        markdown = """| Status | Code |
+|--------|------|
+| error---retry | 500 |
+"""
+        wb = _create_workbook_from_markdown(markdown)
+        ws = wb.active
+        assert ws.cell(row=2, column=1).value == "error---retry"
+        assert ws.cell(row=2, column=2).value == 500.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+
 
