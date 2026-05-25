@@ -1,77 +1,31 @@
 import io
 import logging
-import re
-from typing import List, Dict
+
 from openpyxl import Workbook
+from openpyxl.styles import Font
+from openpyxl.utils.exceptions import SheetTitleException
 
 from upload_tools import upload_file
-from .helpers import (
-    parse_table,
-    add_table_to_sheet,
+from .helpers import add_table_to_sheet
+from .parser import (
+    walk_markdown_lines,
+    collect_table_positions,
+    SheetEvent,
+    HeaderEvent,
+    TableEvent,
+    DEFAULT_SHEET_NAME,
+    _sanitize_sheet_name,
 )
 
 logger = logging.getLogger(__name__)
 
-# Pattern for multi-sheet heading: ## Sheet: Name
-SHEET_HEADING_PATTERN = re.compile(r'^##\s+Sheet:\s+(.+)$')
-
-DEFAULT_SHEET_NAME = "Data Report"
-
-
-def _scan_table_positions(lines: List[str]) -> Dict[str, Dict[str, int]]:
-    """Pass 1 – dry-run scan to discover every table position on every sheet.
-
-    Returns ``all_sheet_table_positions``: a mapping of
-    ``{sheet_name: {"T1": start_row, "T2": start_row, ...}}``.
-    No workbook is created – we only simulate row advancement.
-    """
-    all_positions: Dict[str, Dict[str, int]] = {}
-
-    current_sheet = DEFAULT_SHEET_NAME
-    current_row = 1
-    table_counter = 1
-    first_sheet_named = False
-    all_positions[current_sheet] = {}
-
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-
-        if not line:
-            i += 1
-            continue
-
-        sheet_match = SHEET_HEADING_PATTERN.match(line)
-        if sheet_match:
-            sheet_name = sheet_match.group(1).strip()
-            if not first_sheet_named and current_row == 1:
-                # Rename the default virtual sheet
-                all_positions[sheet_name] = all_positions.pop(current_sheet)
-                current_sheet = sheet_name
-            else:
-                current_sheet = sheet_name
-                current_row = 1
-                table_counter = 1
-                all_positions.setdefault(current_sheet, {})
-            first_sheet_named = True
-            i += 1
-            continue
-
-        if line.startswith('#'):
-            current_row += 2  # header + spacing
-            i += 1
-
-        elif line.startswith('|'):
-            table_data, i = parse_table(lines, i)
-            if table_data:
-                table_key = f"T{table_counter}"
-                all_positions[current_sheet][table_key] = current_row
-                current_row += len(table_data) + 2  # rows + spacing
-                table_counter += 1
-        else:
-            i += 1
-
-    return all_positions
+# ── Constants ──────────────────────────────────────────────────────────────────
+# Header font styles by level
+HEADER_FONTS = {
+    1: Font(size=16, bold=True, color="2F5597"),
+    2: Font(size=14, bold=True, color="4472C4"),
+}
+HEADER_FONT_DEFAULT = Font(size=12, bold=True)
 
 
 def markdown_to_excel(markdown_content: str, file_name: str | None = None) -> str:
@@ -80,128 +34,100 @@ def markdown_to_excel(markdown_content: str, file_name: str | None = None) -> st
     Always starts from an empty Workbook (no templates).
     Supports multiple sheets via '## Sheet: Name' headings.
     Supports cross-sheet references via ``SheetName!T1.B[0]`` syntax.
+
+    Raises:
+        RuntimeError: If the markdown contains no tables or conversion fails.
     """
     logger.info("Starting markdown_to_excel conversion")
 
-    # Split content into lines
-    lines: List[str] = markdown_content.split('\n')
+    # ── Input validation ──
+    if not markdown_content or not markdown_content.strip():
+        raise RuntimeError("Cannot create Excel workbook: markdown content is empty")
 
-    # ── Pass 1: discover all table positions across all sheets ──
-    all_sheet_table_positions = _scan_table_positions(lines)
+    # Split content into lines and parse into events (single shared state machine)
+    lines: list[str] = markdown_content.split('\n')
+    events = walk_markdown_lines(lines)
+
+    # Build table position map from events (used for cross-sheet formula resolution)
+    all_sheet_table_positions = collect_table_positions(events)
     logger.debug("Table positions (all sheets): %s", all_sheet_table_positions)
 
-    # ── Pass 2: create the actual workbook ──
+    # ── Build the actual workbook from events ──
     wb = Workbook()
     ws = wb.active
+    ws.title = _sanitize_sheet_name(DEFAULT_SHEET_NAME)
 
-    # Set default worksheet title
-    try:
-        ws.title = DEFAULT_SHEET_NAME
-    except Exception:
-        logger.debug("Could not set worksheet title; keeping default")
+    # Per-sheet state for formula resolution
+    table_positions: dict[str, int] = {}
 
-    current_sheet_name = DEFAULT_SHEET_NAME
-
-    # Counters for a short summary
+    # Counters for summary
     headers_count = 0
     tables_count = 0
 
-    # Per-sheet state
-    current_row = 1
-    table_counter = 1
-    table_positions: Dict[str, int] = {}  # Track where each table starts
-    first_sheet_named = False  # Whether we've set a name for the first sheet
-    i = 0
-
     try:
-        while i < len(lines):
-            line = lines[i].strip()
-
-            # Skip empty lines
-            if not line:
-                i += 1
-                continue
-
-            # Check for sheet heading: ## Sheet: Name
-            sheet_match = SHEET_HEADING_PATTERN.match(line)
-            if sheet_match:
-                sheet_name = sheet_match.group(1).strip()
-                if not first_sheet_named and current_row == 1:
-                    # Rename the default sheet instead of creating a new one
+        for event in events:
+            if isinstance(event, SheetEvent):
+                if event.is_rename:
                     try:
-                        ws.title = sheet_name
-                    except Exception:
-                        logger.debug("Could not rename worksheet to '%s'", sheet_name)
+                        ws.title = event.sheet_name
+                    except (SheetTitleException, ValueError) as exc:
+                        logger.warning(
+                            "Could not rename worksheet to '%s': %s — using default",
+                            event.sheet_name, exc,
+                        )
                 else:
-                    # Create a new worksheet
-                    ws = wb.create_sheet(title=sheet_name)
-                    current_row = 1
-                    table_counter = 1
+                    try:
+                        ws = wb.create_sheet(title=event.sheet_name)
+                    except (SheetTitleException, ValueError) as exc:
+                        logger.warning(
+                            "Invalid sheet name '%s': %s — using fallback",
+                            event.sheet_name, exc,
+                        )
+                        ws = wb.create_sheet()
                     table_positions = {}
-                current_sheet_name = sheet_name
-                first_sheet_named = True
-                i += 1
-                continue
 
-            # Headers
-            if line.startswith('#'):
-                header_level = len(line) - len(line.lstrip('#'))
-                header_text = line.lstrip('#').strip()
-
-                cell = ws.cell(row=current_row, column=1)
-                cell.value = header_text
-
-                # Style headers based on level
-                from openpyxl.styles import Font  # local import to keep top clean
-                if header_level == 1:
-                    cell.font = Font(size=16, bold=True, color="2F5597")
-                elif header_level == 2:
-                    cell.font = Font(size=14, bold=True, color="4472C4")
-                else:
-                    cell.font = Font(size=12, bold=True)
-
+            elif isinstance(event, HeaderEvent):
+                cell = ws.cell(row=event.row, column=1)
+                cell.value = event.text
+                cell.font = HEADER_FONTS.get(event.level, HEADER_FONT_DEFAULT)
                 headers_count += 1
-                logger.debug("Header (level %d): %s", header_level, header_text)
+                logger.debug("Header (level %d) at row %d: %s", event.level, event.row, event.text)
 
-                current_row += 2  # Add space after headers
-                i += 1
+            elif isinstance(event, TableEvent):
+                # Record this table's position for local formula resolution
+                table_positions[event.table_key] = event.start_row
 
-            # Tables
-            elif line.startswith('|'):
-                table_data, i = parse_table(lines, i)
-                if table_data:
-                    # Record this table's position
-                    table_key = f"T{table_counter}"
-                    table_positions[table_key] = current_row
+                # Write table to worksheet
+                add_table_to_sheet(
+                    event.table_data, ws, event.start_row, table_positions,
+                    all_sheet_table_positions=all_sheet_table_positions,
+                )
 
-                    # Process the table
-                    start_row_before = current_row
-                    current_row = add_table_to_sheet(
-                        table_data, ws, current_row, table_positions,
-                        all_sheet_table_positions=all_sheet_table_positions,
-                    )
-                    _row_count = current_row - start_row_before - 2  # subtract header and spacing
-
-                    tables_count += 1
-                    logger.debug("Added table #%d with %d rows", tables_count, len(table_data))
-                    table_counter += 1
-
-            # Skip other content
-            else:
-                i += 1
+                tables_count += 1
+                logger.debug(
+                    "Added table #%d (%s) with %d data rows on sheet '%s'",
+                    tables_count, event.table_key, len(event.table_data) - 1, event.sheet_name,
+                )
 
     except Exception as e:
         logger.error("Error generating Excel workbook: %s", str(e), exc_info=True)
         raise RuntimeError(f"Error generating Excel workbook: {e}") from e
 
+    # ── Validation: ensure at least one table was created ──
+    if tables_count == 0:
+        raise RuntimeError(
+            "Cannot create Excel workbook: no valid markdown tables found in the input. "
+            "Tables must use pipe syntax (| col1 | col2 |) with a separator row (|---|---|)."
+        )
+
     # Save workbook to BytesIO and upload via existing helper
     file_object = io.BytesIO()
     try:
-        logger.info("Saving Excel workbook to memory buffer")
+        logger.info("Saving Excel workbook to memory buffer (headers=%d, tables=%d)", headers_count, tables_count)
         wb.save(file_object)
         file_object.seek(0)
         result = upload_file(file_object, "xlsx", filename=file_name)
-        logger.info("Excel upload completed (headers=%d, tables=%d)", headers_count, tables_count)
+        logger.info("Excel upload completed successfully")
         return result
     except Exception as e:
         logger.error("Error saving/uploading Excel workbook: %s", str(e), exc_info=True)
