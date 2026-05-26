@@ -4,6 +4,7 @@ These tests verify that the markdown to Excel conversion handles
 the '## Sheet: Name' heading syntax correctly for multi-sheet workbooks.
 """
 
+import inspect
 import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -20,10 +21,11 @@ import io
 from xlsx_tools.base_xlsx_tool import markdown_to_excel
 
 
-def _create_workbook_from_markdown(markdown_content: str) -> Workbook:
+def _create_workbook_from_markdown(markdown_content: str, save_name: str | None = None) -> Workbook:
     """Helper that runs markdown_to_excel but intercepts the workbook before upload.
 
     Patches upload_file to capture the BytesIO and returns a loaded Workbook.
+    Automatically saves output to OUTPUT_DIR for manual inspection.
     """
     captured = {}
 
@@ -35,7 +37,18 @@ def _create_workbook_from_markdown(markdown_content: str) -> Workbook:
     with patch("xlsx_tools.base_xlsx_tool.upload_file", side_effect=fake_upload):
         markdown_to_excel(markdown_content)
 
-    wb = load_workbook(io.BytesIO(captured['data']))
+    data = captured['data']
+    wb = load_workbook(io.BytesIO(data))
+
+    # Auto-derive save name from calling test function
+    if save_name is None:
+        frame = inspect.stack()[1]
+        save_name = frame.function
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = OUTPUT_DIR / f"{save_name}.xlsx"
+    out_path.write_bytes(data)
+
     return wb
 
 
